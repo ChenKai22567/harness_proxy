@@ -1,0 +1,63 @@
+{
+  "proxy": {
+    "host": "127.0.0.1",
+    "port": 7890,
+    "preset": "Clash / Mihomo (7890)",
+    "bypass": "localhost,127.0.0.1,::1",
+    "timeout_ms": 2000
+  },
+  "presets": [
+    {
+      "name": "Clash / Mihomo (7890)",
+      "host": "127.0.0.1",
+      "port": 7890
+    },
+    {
+      "name": "Clash Verge (7897)",
+      "host": "127.0.0.1",
+      "port": 7897
+    },
+    {
+      "name": "v2rayN / Xray (10808)",
+      "host": "127.0.0.1",
+      "port": 10808
+    },
+    {
+      "name": "Sing-box (2080)",
+      "host": "127.0.0.1",
+      "port": 2080
+    },
+    {
+      "name": "自定义端口",
+      "host": "127.0.0.1",
+      "port": 7890
+    }
+  ],
+  "apps": {
+    "antigravity": {
+      "auto_detect": true,
+      "custom_path": "",
+      "enable_browser_shim": true,
+      "custom_node_path": "",
+      "enabled_in_batch": true,
+      "components": {
+        "gpu_acceleration": true
+      }
+    },
+    "codex": {
+      "auto_detect": true,
+      "custom_path": "",
+      "detect_ms_store": true,
+      "enabled_in_batch": true,
+      "components": {
+        "gpu_acceleration": true,
+        "websocket_proxy": true
+      }
+    }
+  },
+  "launcher": {
+    "minimize_to_tray_on_close": true,
+    "check_clash_before_launch": true,
+    "start_minimized": false
+  }
+}

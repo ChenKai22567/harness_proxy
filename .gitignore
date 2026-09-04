@@ -1,0 +1,29 @@
+# Python bytecode and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build and release output
+build/
+dist/
+.harness-release-*/
+*.spec
+
+# Local runtime state
+config.json
+managed_sessions.json
+logs/
+*.log
+
+# Local QA and tool state
+artifacts/
+.codex-backups/
+.playwright-cli/
+.pytest_cache/
+.coverage
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
+desktop.ini
