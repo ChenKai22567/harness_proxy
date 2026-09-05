@@ -1,47 +1,14 @@
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from typing import Callable, Optional
 
 from core.config_manager import ConfigManager, get_resource_path
 from core.proxy_prober import probe_tcp_port, scan_available_proxies
-from gui.widgets import PolishedComboBox
-
-# Shared neutral desktop design tokens.
-FONT_FAMILY = "Microsoft YaHei UI"
-
-COLOR_BG = "#F3F3F3"
-COLOR_CARD_BG = "#FFFFFF"
-COLOR_CARD_SOFT = "#F7F7F7"
-COLOR_CARD_HOVER = "#F0F0F0"
-COLOR_CARD_BORDER = "#E1E1E1"
-COLOR_BORDER_STRONG = "#C7C7C7"
-
-COLOR_TEXT_HEADING = "#1F1F1F"
-COLOR_TEXT_PRIMARY = "#242424"
-COLOR_TEXT_SECTION = "#3A3A3A"
-COLOR_TEXT_MUTED = "#666666"
-COLOR_TEXT_SUBTLE = "#8A8A8A"
-
-COLOR_ACCENT = "#3B3B3B"
-COLOR_ACCENT_HOVER = "#2F2F2F"
-COLOR_ACCENT_SOFT = "#EEEEEE"
-
-COLOR_SUCCESS = "#0AA36D"          # --type-manufacture: #0aa36d (refined emerald green)
-COLOR_SUCCESS_HOVER = "#088A5C"
-COLOR_SUCCESS_BG = "#E7F7F0"
-COLOR_SUCCESS_TEXT = "#0A8055"
-
-COLOR_WARN = "#F28A00"             # --city: #f28a00 (warm tech amber)
-COLOR_WARN_BG = "#FFF7EB"
-COLOR_WARN_TEXT = "#B45309"
-
-COLOR_ERROR = "#D95765"            # --policy-data-red: #d95765 (soft rose-red)
-COLOR_ERROR_BG = "#FDF0F1"
-COLOR_ERROR_BORDER = "#F8CCD1"
-COLOR_ERROR_TEXT = "#C53041"
-COLOR_ERROR_HOVER = "#FCE1E4"
+from gui.theme import *  # noqa: F401,F403 - shared design tokens
+from gui.widgets import CrispCheckBox, PolishedComboBox
 
 COLOR_INACTIVE_BG = "#EEEEEE"
 COLOR_INACTIVE_TEXT = "#808080"
@@ -58,6 +25,7 @@ class SettingsDialog(ctk.CTkToplevel):
         config_mgr: ConfigManager,
         on_save_callback: Optional[Callable[[], None]] = None,
         on_close_callback: Optional[Callable[[], None]] = None,
+        worker_executor: Optional[ThreadPoolExecutor] = None,
     ):
         super().__init__(parent)
         # A CTkToplevel maps immediately unless explicitly withdrawn.  Build it
@@ -65,6 +33,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.withdraw()
         self._parent = parent
         self._ui_thread_id = threading.get_ident()
+        self._worker_executor = worker_executor
 
         # Always reload the freshest configuration from disk every time opened
         self.config_mgr = config_mgr
@@ -142,6 +111,16 @@ class SettingsDialog(ctk.CTkToplevel):
         parent_dispatch = getattr(self._parent, "_dispatch_ui", None)
         if callable(parent_dispatch):
             parent_dispatch(_safe_callback)
+
+    def _run_in_background(self, worker):
+        """Probe on the shared launcher executor; fall back to a bare thread."""
+        if self._worker_executor is not None:
+            try:
+                self._worker_executor.submit(worker)
+                return
+            except RuntimeError:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def _close(self):
         if self._close_notified:
@@ -352,14 +331,14 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(anchor="w", padx=14, pady=(8, 3))
 
         self.anti_auto_var = ctk.BooleanVar(value=True)
-        self.anti_auto_chk = ctk.CTkCheckBox(
+        self.anti_auto_chk = CrispCheckBox(
             anti_card,
             text="自动扫描安装位置 (推荐，自适应不同计算机路径)",
             variable=self.anti_auto_var,
             command=self._toggle_anti_path,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=16,
+            checkbox_height=16,
             corner_radius=3,
             border_width=1,
             border_color=COLOR_BORDER_STRONG,
@@ -410,13 +389,13 @@ class SettingsDialog(ctk.CTkToplevel):
         self.anti_browse_btn.pack(side="left", padx=2)
 
         self.anti_shim_var = ctk.BooleanVar(value=True)
-        self.anti_shim_chk = ctk.CTkCheckBox(
+        self.anti_shim_chk = CrispCheckBox(
             anti_card,
             text="装载浏览器代理补丁 (Node.js/npx 自动接管 DevTools)",
             variable=self.anti_shim_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=16,
+            checkbox_height=16,
             corner_radius=3,
             border_width=1,
             border_color=COLOR_BORDER_STRONG,
@@ -439,14 +418,14 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(anchor="w", padx=14, pady=(8, 3))
 
         self.codex_auto_var = ctk.BooleanVar(value=True)
-        self.codex_auto_chk = ctk.CTkCheckBox(
+        self.codex_auto_chk = CrispCheckBox(
             codex_card,
             text="自动检索 Microsoft Store 包 (OpenAI.Codex 注册表直查)",
             variable=self.codex_auto_var,
             command=self._toggle_codex_path,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=16,
+            checkbox_height=16,
             corner_radius=3,
             border_width=1,
             border_color=COLOR_BORDER_STRONG,
@@ -511,13 +490,13 @@ class SettingsDialog(ctk.CTkToplevel):
         gen_row.pack(fill="x", padx=14, pady=(2, 8))
 
         self.tray_var = ctk.BooleanVar(value=True)
-        self.tray_chk = ctk.CTkCheckBox(
+        self.tray_chk = CrispCheckBox(
             gen_row,
             text="关闭时最小化到系统托盘",
             variable=self.tray_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=16,
+            checkbox_height=16,
             corner_radius=3,
             border_width=1,
             border_color=COLOR_BORDER_STRONG,
@@ -529,13 +508,13 @@ class SettingsDialog(ctk.CTkToplevel):
         self.tray_chk.pack(side="left", padx=(0, 20))
 
         self.check_clash_var = ctk.BooleanVar(value=True)
-        self.check_clash_chk = ctk.CTkCheckBox(
+        self.check_clash_chk = CrispCheckBox(
             gen_row,
             text="启动前强校验端口 (防误开直连)",
             variable=self.check_clash_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=16,
+            checkbox_height=16,
             corner_radius=3,
             border_width=1,
             border_color=COLOR_BORDER_STRONG,
@@ -550,13 +529,13 @@ class SettingsDialog(ctk.CTkToplevel):
         gen_row2.pack(fill="x", padx=14, pady=(0, 8))
 
         self.start_minimized_var = ctk.BooleanVar(value=False)
-        self.start_minimized_chk = ctk.CTkCheckBox(
+        self.start_minimized_chk = CrispCheckBox(
             gen_row2,
             text="启动后直接隐藏到系统托盘",
             variable=self.start_minimized_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=16,
+            checkbox_height=16,
             corner_radius=3,
             border_width=1,
             border_color=COLOR_BORDER_STRONG,
@@ -725,7 +704,7 @@ class SettingsDialog(ctk.CTkToplevel):
                     )
             self._dispatch_ui(_update)
 
-        threading.Thread(target=_run, daemon=True).start()
+            self._run_in_background(_run)
 
     def _scan_ports(self):
         host = self.host_entry.get().strip() or "127.0.0.1"
@@ -752,7 +731,7 @@ class SettingsDialog(ctk.CTkToplevel):
                     )
             self._dispatch_ui(_update)
 
-        threading.Thread(target=_run, daemon=True).start()
+            self._run_in_background(_run)
 
     def _reset_defaults(self):
         if messagebox.askyesno("确认恢复默认", "是否重置所有配置为默认值？", parent=self):

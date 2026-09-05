@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Packaging only; not needed to run the launcher from source.
+PyInstaller>=6.11.1

@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 from typing import Callable, Dict, Optional
 
@@ -6,30 +7,17 @@ import customtkinter as ctk
 
 from core.config_manager import ConfigManager, get_resource_path
 from core.launcher_engine import LauncherEngine
+from gui.theme import *  # noqa: F401,F403 - shared design tokens
+from gui.widgets import CrispCheckBox
 
-
-FONT_FAMILY = "Microsoft YaHei UI"
-COLOR_BG = "#F3F3F3"
-COLOR_CARD_BG = "#FFFFFF"
-COLOR_CARD_SOFT = "#F7F7F7"
-COLOR_CARD_HOVER = "#F0F0F0"
-COLOR_BORDER = "#E1E1E1"
-COLOR_BORDER_STRONG = "#C7C7C7"
-COLOR_TEXT = "#242424"
-COLOR_HEADING = "#1F1F1F"
-COLOR_SECTION = "#3A3A3A"
-COLOR_MUTED = "#666666"
-COLOR_SUBTLE = "#8A8A8A"
-COLOR_ACCENT = "#3B3B3B"
-COLOR_ACCENT_HOVER = "#2F2F2F"
-COLOR_ACCENT_SOFT = "#EEEEEE"
-COLOR_SUCCESS_BG = "#E7F7F0"
-COLOR_SUCCESS_TEXT = "#0A8055"
-COLOR_WARN_BG = "#FFF7EB"
-COLOR_WARN_TEXT = "#B45309"
-COLOR_ERROR_BG = "#FDF0F1"
-COLOR_ERROR_TEXT = "#C53041"
-COLOR_ERROR_BORDER = "#F8CCD1"
+# Short local aliases over the shared tokens; the values themselves live in
+# gui/theme.py only.
+COLOR_BORDER = COLOR_CARD_BORDER
+COLOR_TEXT = COLOR_TEXT_PRIMARY
+COLOR_HEADING = COLOR_TEXT_HEADING
+COLOR_SECTION = COLOR_TEXT_SECTION
+COLOR_MUTED = COLOR_TEXT_MUTED
+COLOR_SUBTLE = COLOR_TEXT_SUBTLE
 
 
 APP_LABELS = {
@@ -51,6 +39,7 @@ class ComponentDialog(ctk.CTkToplevel):
         app_id: str = "codex",
         on_saved: Optional[Callable[[], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
+        worker_executor: Optional[ThreadPoolExecutor] = None,
     ):
         super().__init__(parent)
         self.withdraw()
@@ -61,14 +50,15 @@ class ComponentDialog(ctk.CTkToplevel):
         self.on_saved = on_saved
         self.on_close = on_close
         self._ui_thread_id = threading.get_ident()
+        self._worker_executor = worker_executor
         self._refreshing = False
         self._refresh_requested = False
         self._closed = False
         self._snapshot: Dict = {}
 
         self.title("组件与子进程 - Harness代理启动")
-        self.geometry("760x680")
-        self.minsize(720, 620)
+        self.geometry("724x624")
+        self.minsize(680, 560)
         self.configure(fg_color=COLOR_BG)
         self.transient(parent)
         icon_path = get_resource_path("assets", "icon.ico")
@@ -86,7 +76,7 @@ class ComponentDialog(ctk.CTkToplevel):
         self._refresh_async()
 
     def _center_over_parent(self):
-        width, height = 760, 680
+        width, height = 724, 624
         try:
             physical_width = self._apply_window_scaling(width)
             physical_height = self._apply_window_scaling(height)
@@ -126,9 +116,9 @@ class ComponentDialog(ctk.CTkToplevel):
             self, corner_radius=8, fg_color=COLOR_CARD_BG,
             border_width=1, border_color=COLOR_BORDER,
         )
-        header.pack(fill="x", padx=14, pady=(12, 6))
+        header.pack(fill="x", padx=12, pady=(10, 4))
         title_row = ctk.CTkFrame(header, fg_color="transparent")
-        title_row.pack(fill="x", padx=14, pady=(10, 4))
+        title_row.pack(fill="x", padx=12, pady=(8, 3))
         ctk.CTkLabel(
             title_row, text="组件与子进程", text_color=COLOR_HEADING,
             font=ctk.CTkFont(family=FONT_FAMILY, size=17, weight="bold"),
@@ -155,16 +145,16 @@ class ComponentDialog(ctk.CTkToplevel):
             text_color_disabled=COLOR_SUBTLE,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
         )
-        self.app_selector.pack(fill="x", padx=14, pady=(2, 10))
+        self.app_selector.pack(fill="x", padx=12, pady=(2, 8))
         self.app_selector.set(APP_LABELS[self.app_id])
 
         summary = ctk.CTkFrame(
             self, corner_radius=8, fg_color=COLOR_CARD_BG,
             border_width=1, border_color=COLOR_BORDER,
         )
-        summary.pack(fill="x", padx=14, pady=5)
+        summary.pack(fill="x", padx=12, pady=4)
         summary_row = ctk.CTkFrame(summary, fg_color="transparent")
-        summary_row.pack(fill="x", padx=14, pady=(9, 4))
+        summary_row.pack(fill="x", padx=12, pady=(7, 3))
         self.summary_title = ctk.CTkLabel(
             summary_row, text="正在读取进程…", anchor="w", text_color=COLOR_SECTION,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
@@ -181,34 +171,34 @@ class ComponentDialog(ctk.CTkToplevel):
             anchor="w", justify="left", text_color=COLOR_MUTED,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
         )
-        self.summary_detail.pack(fill="x", padx=14, pady=(0, 9))
+        self.summary_detail.pack(fill="x", padx=12, pady=(0, 7))
 
         policy = ctk.CTkFrame(
             self, corner_radius=8, fg_color=COLOR_CARD_BG,
             border_width=1, border_color=COLOR_BORDER,
         )
-        policy.pack(fill="x", padx=14, pady=5)
+        policy.pack(fill="x", padx=12, pady=4)
         ctk.CTkLabel(
             policy, text="启动策略", anchor="w", text_color=COLOR_SECTION,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-        ).pack(fill="x", padx=14, pady=(8, 3))
+        ).pack(fill="x", padx=12, pady=(7, 3))
         policy_row = ctk.CTkFrame(policy, fg_color="transparent")
-        policy_row.pack(fill="x", padx=14, pady=(2, 9))
+        policy_row.pack(fill="x", padx=12, pady=(2, 7))
         self.batch_var = ctk.BooleanVar(value=True)
-        self.batch_switch = self._make_switch(
+        self.batch_switch, _, _ = self._make_switch(
             policy_row, "纳入一键启动", self.batch_var,
             "决定批量启动是否包含此应用",
         )
         self.batch_switch.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.shim_var = ctk.BooleanVar(value=True)
-        self.secondary_switch = self._make_switch(
+        self.secondary_switch, self._secondary_switch, self._secondary_switch_label = self._make_switch(
             policy_row, "浏览器代理补丁", self.shim_var,
             "Antigravity 下次启动生效",
         )
         self.secondary_switch.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         list_header = ctk.CTkFrame(self, fg_color="transparent")
-        list_header.pack(fill="x", padx=18, pady=(7, 2))
+        list_header.pack(fill="x", padx=16, pady=(6, 2))
         ctk.CTkLabel(
             list_header, text="运行组件", text_color=COLOR_SECTION,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
@@ -228,10 +218,10 @@ class ComponentDialog(ctk.CTkToplevel):
             scrollbar_button_color="#C7C7C7",
             scrollbar_button_hover_color="#A8A8A8",
         )
-        self.component_list.pack(fill="both", expand=True, padx=14, pady=(2, 6))
+        self.component_list.pack(fill="both", expand=True, padx=12, pady=(2, 5))
 
         action_bar = ctk.CTkFrame(self, fg_color="transparent")
-        action_bar.pack(fill="x", padx=14, pady=(2, 12))
+        action_bar.pack(fill="x", padx=12, pady=(2, 10))
         self.action_status = ctk.CTkLabel(
             action_bar, text="", text_color=COLOR_MUTED, anchor="w",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
@@ -265,6 +255,8 @@ class ComponentDialog(ctk.CTkToplevel):
         self._load_policies()
 
     def _make_switch(self, parent, title, variable, description):
+        """Return (frame, switch, label) so callers never depend on the
+        widget packing order inside the frame."""
         frame = ctk.CTkFrame(parent, fg_color=COLOR_CARD_SOFT, corner_radius=6)
         switch = ctk.CTkSwitch(
             frame, text=title, variable=variable, progress_color=COLOR_ACCENT,
@@ -273,11 +265,12 @@ class ComponentDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
         )
         switch.pack(anchor="w", padx=10, pady=(7, 1))
-        ctk.CTkLabel(
+        label = ctk.CTkLabel(
             frame, text=description, anchor="w", text_color=COLOR_MUTED,
             font=ctk.CTkFont(family=FONT_FAMILY, size=10),
-        ).pack(fill="x", padx=10, pady=(0, 6))
-        return frame
+        )
+        label.pack(fill="x", padx=10, pady=(0, 6))
+        return frame, switch, label
 
     def _on_app_selected(self, label: str):
         app_id = next((key for key, value in APP_LABELS.items() if value == label), "codex")
@@ -295,16 +288,12 @@ class ComponentDialog(ctk.CTkToplevel):
         self.gpu_var.set(config.get("components", {}).get("gpu_acceleration", True))
         if self.app_id == "antigravity":
             self.shim_var.set(config.get("enable_browser_shim", True))
-            switch = self.secondary_switch.winfo_children()[0]
-            label = self.secondary_switch.winfo_children()[1]
-            switch.configure(text="浏览器代理补丁", state="normal")
-            label.configure(text="Antigravity 下次启动生效")
+            self._secondary_switch.configure(text="浏览器代理补丁", state="normal")
+            self._secondary_switch_label.configure(text="Antigravity 下次启动生效")
         else:
             self.shim_var.set(True)
-            switch = self.secondary_switch.winfo_children()[0]
-            label = self.secondary_switch.winfo_children()[1]
-            switch.configure(text="API / WebSocket 代理", state="disabled")
-            label.configure(text="必要组件，始终随 Codex 启动")
+            self._secondary_switch.configure(text="API / WebSocket 代理", state="disabled")
+            self._secondary_switch_label.configure(text="必要组件，始终随 Codex 启动")
 
     def _save_policies(self):
         app = self.config_mgr.config.setdefault("apps", {}).setdefault(self.app_id, {})
@@ -320,6 +309,16 @@ class ComponentDialog(ctk.CTkToplevel):
                 self.on_saved()
         else:
             self.action_status.configure(text="保存失败，请检查配置目录权限。", text_color=COLOR_ERROR_TEXT)
+
+    def _run_in_background(self, worker):
+        """Sample on the shared launcher executor; fall back to a bare thread."""
+        if self._worker_executor is not None:
+            try:
+                self._worker_executor.submit(worker)
+                return
+            except RuntimeError:
+                pass
+        threading.Thread(target=worker, daemon=True, name="component-worker").start()
 
     def _refresh_async(self):
         if self._closed:
@@ -343,7 +342,7 @@ class ComponentDialog(ctk.CTkToplevel):
             finally:
                 self._dispatch_ui(self._finish_refresh)
 
-        threading.Thread(target=worker, daemon=True, name="component-snapshot").start()
+        self._run_in_background(worker)
 
     def _finish_refresh(self):
         self._refreshing = False
@@ -411,27 +410,27 @@ class ComponentDialog(ctk.CTkToplevel):
             fg_color=COLOR_CARD_BG if present else "#FAFAFA",
             border_width=1, border_color=COLOR_BORDER,
         )
-        row.pack(fill="x", padx=4, pady=4)
+        row.pack(fill="x", padx=4, pady=3)
 
         if component.get("control") == "policy":
-            control = ctk.CTkCheckBox(
+            control = CrispCheckBox(
                 row, text="", width=24, variable=self.gpu_var,
-                checkbox_width=18, checkbox_height=18, corner_radius=3,
+                checkbox_width=16, checkbox_height=16,
                 border_width=1, border_color=COLOR_BORDER_STRONG,
                 fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             )
         else:
             state_var = ctk.BooleanVar(value=present)
-            control = ctk.CTkCheckBox(
+            control = CrispCheckBox(
                 row, text="", width=24, variable=state_var, state="disabled",
-                checkbox_width=18, checkbox_height=18, corner_radius=3,
+                checkbox_width=16, checkbox_height=16,
                 border_width=1, border_color=COLOR_BORDER_STRONG,
                 fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             )
         control.pack(side="left", padx=(10, 4))
 
         text_frame = ctk.CTkFrame(row, fg_color="transparent")
-        text_frame.pack(side="left", fill="x", expand=True, padx=4, pady=7)
+        text_frame.pack(side="left", fill="x", expand=True, padx=4, pady=6)
         ctk.CTkLabel(
             text_frame, text=component.get("label", "未知组件"), anchor="w",
             text_color=COLOR_TEXT if present else COLOR_MUTED,
@@ -535,7 +534,7 @@ class ComponentDialog(ctk.CTkToplevel):
                 ok, message = False, str(exc)
             self._dispatch_ui(lambda: self._after_action(ok, message))
 
-        threading.Thread(target=worker, daemon=True, name="component-action").start()
+        self._run_in_background(worker)
 
     def _after_action(self, ok: bool, message: str):
         self.action_status.configure(

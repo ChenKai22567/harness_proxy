@@ -58,8 +58,9 @@
 桌面即可生成 **`Harness代理启动.lnk`** 快捷方式，双击直接启动。
 
 ### 方式三：打包为独立免安装绿色软件（发给他人使用）
-运行打包脚本：
+先安装包含打包工具的完整依赖，再运行打包脚本：
 ```powershell
+python -m pip install -r requirements-dev.txt
 python build.py
 ```
 构建成功后，在 `dist\HarnessProxyLauncher` 目录下会生成完整的绿色免安装应用包。将整个 `HarnessProxyLauncher` 文件夹压缩打包（ZIP）发给任何人，对方双击 `HarnessProxyLauncher.exe` 即可使用，**对方电脑无需安装 Python 或任何环境**。
@@ -101,7 +102,8 @@ harness_proxy\
 ├── build.py                     # 自动化打包脚本
 ├── config.example.json          # 可公开的默认配置示例
 ├── config.json                  # 本地持久化配置（首次运行生成，不入库）
-├── requirements.txt             # Python 运行与构建依赖
+├── requirements.txt             # Python 运行依赖
+├── requirements-dev.txt         # 打包/构建附加依赖 (PyInstaller)
 ├── DESIGN_AND_PERFORMANCE_PLAN.md # 子进程设计与性能优化计划
 ├── install_desktop_shortcut.ps1 # 桌面快捷方式安装器
 ├── main.py                      # 程序主入口

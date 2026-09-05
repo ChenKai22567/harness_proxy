@@ -5,6 +5,10 @@ import tempfile
 import threading
 from typing import Dict, Any
 
+# Single fallback for the proxy probe timeout, shared by the engine, the
+# monitor loop and _normalize so the pre-2000 defaults can never diverge.
+DEFAULT_PROXY_TIMEOUT_MS = 2000
+
 def get_app_root_dir() -> str:
     """Return the writable application directory.
 
@@ -35,7 +39,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "port": 7890,
         "preset": "Clash / Mihomo (7890)",
         "bypass": "localhost,127.0.0.1,::1",
-        "timeout_ms": 2000
+        "timeout_ms": DEFAULT_PROXY_TIMEOUT_MS
     },
     "presets": [
         {"name": "Clash / Mihomo (7890)", "host": "127.0.0.1", "port": 7890},
@@ -171,9 +175,11 @@ class ConfigManager:
         except (TypeError, ValueError):
             proxy["port"] = 7890
         try:
-            proxy["timeout_ms"] = max(200, min(15000, int(proxy.get("timeout_ms", 2000))))
+            proxy["timeout_ms"] = max(
+                200, min(15000, int(proxy.get("timeout_ms", DEFAULT_PROXY_TIMEOUT_MS)))
+            )
         except (TypeError, ValueError):
-            proxy["timeout_ms"] = 2000
+            proxy["timeout_ms"] = DEFAULT_PROXY_TIMEOUT_MS
 
         presets = config.get("presets")
         if not isinstance(presets, list) or not presets:
@@ -203,5 +209,8 @@ class ConfigManager:
         config["apps"]["antigravity"]["enable_browser_shim"] = bool(
             config["apps"]["antigravity"].get("enable_browser_shim", True)
         )
+        # Codex routes secure WebSocket over the standard HTTPS proxy.  This
+        # capability is deliberately locked on (the UI disables the switch),
+        # so a hand-edited "false" is corrected instead of honoured.
         config["apps"]["codex"]["components"]["websocket_proxy"] = True
         return config

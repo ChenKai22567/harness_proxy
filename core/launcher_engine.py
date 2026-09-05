@@ -1,12 +1,16 @@
 import os
-import sys
 import time
 import subprocess
 import threading
 from datetime import datetime
 from typing import Optional, Callable, Dict, Any, List, Tuple
 
-from core.config_manager import ConfigManager, get_app_root_dir, get_resource_path
+from core.config_manager import (
+    DEFAULT_PROXY_TIMEOUT_MS,
+    ConfigManager,
+    get_app_root_dir,
+    get_resource_path,
+)
 from core.proxy_prober import probe_tcp_port, probe_https_via_proxy
 from core.process_detector import (
     find_antigravity_executable,
@@ -19,6 +23,35 @@ from core.process_detector import (
 from core.process_classifier import collect_component_snapshot
 from core.supervisor import SessionSupervisor
 
+# On-disk log rotation: one active file plus this many rotated backups.
+LOG_ROTATE_BYTES = 1024 * 1024
+LOG_ROTATE_BACKUPS = 5
+
+_NODE_BOOTSTRAP_MARKER = "node-proxy-bootstrap.cjs"
+
+
+def _merge_node_options(existing: str, bootstrap_path: str) -> str:
+    """Attach the bootstrap ``--require`` to NODE_OPTIONS.
+
+    Requires pointing at an older install of the same bootstrap are replaced
+    instead of deduplicated by filename: after the launcher moves, a stale
+    path would both skip the new injection and break every Node start with
+    "Cannot find module".  Unrelated ``--require`` entries are preserved.
+    """
+    require_arg = f'--require="{bootstrap_path}"'
+    if not existing:
+        return require_arg
+    kept = [
+        part for part in existing.split()
+        if not (
+            part.lower().startswith("--require=")
+            and _NODE_BOOTSTRAP_MARKER in part.lower()
+        )
+    ]
+    kept.append(require_arg)
+    return " ".join(kept)
+
+
 class LauncherEngine:
     def __init__(
         self,
@@ -26,6 +59,7 @@ class LauncherEngine:
         log_callback: Optional[Callable[[str, str], None]] = None,
         allow_process_control: bool = True,
         session_state_file: Optional[str] = None,
+        log_file: Optional[str] = None,
     ):
         self.config_mgr = config_mgr
         self.log_callback = log_callback
@@ -35,21 +69,24 @@ class LauncherEngine:
         self.node_bootstrap = os.path.join(self.assets_dir, "node-proxy-bootstrap.cjs")
         self.log_dir = os.path.join(self.app_root, "logs")
         os.makedirs(self.log_dir, exist_ok=True)
-        self.log_file = os.path.join(self.log_dir, "launcher.log")
+        self.log_file = log_file or os.path.join(self.log_dir, "launcher.log")
+        self._log_lock = threading.Lock()
         self.allow_process_control = allow_process_control
         self.supervisor = SessionSupervisor(
             session_state_file or os.path.join(self.app_root, "managed_sessions.json"),
             enabled=allow_process_control,
         )
 
-        # Cached paths for zero-lag monitoring
+        # Cached paths for zero-lag monitoring.  Resolution is intentionally
+        # lazy: the registry/PATH scans run inside the first background
+        # preflight (or a manual refresh) instead of delaying the first
+        # window paint; ``preflight_*`` triggers them when needed.
         self.cached_anti_path: Optional[str] = None
         self.cached_codex_path: Optional[str] = None
         self.cached_codex_dir: Optional[str] = None
         self.cached_node_info: Optional[Dict[str, Any]] = None
         self._paths_initialized = False
         self._path_cache_lock = threading.RLock()
-        self.refresh_cached_paths()
 
     def refresh_cached_paths(self):
         """Resolves executable paths once and caches them."""
@@ -145,23 +182,45 @@ class LauncherEngine:
     def log(self, message: str, level: str = "INFO"):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         formatted = f"[{timestamp}] [{level}] {message}"
-        try:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(formatted + "\n")
-        except Exception:
-            pass
+        with self._log_lock:
+            try:
+                self._rotate_log_locked()
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(formatted + "\n")
+            except Exception:
+                pass
         if self.log_callback:
             try:
                 self.log_callback(formatted, level)
             except Exception:
                 pass
-        print(formatted)
+        # A frozen --noconsole build may expose no usable stdout.
+        try:
+            print(formatted)
+        except Exception:
+            pass
+
+    def _rotate_log_locked(self):
+        """Shift launcher.log to launcher.log.1..N once it exceeds the cap."""
+        try:
+            if os.path.getsize(self.log_file) < LOG_ROTATE_BYTES:
+                return
+        except OSError:
+            return
+        try:
+            for index in range(LOG_ROTATE_BACKUPS - 1, 0, -1):
+                source = f"{self.log_file}.{index}"
+                if os.path.exists(source):
+                    os.replace(source, f"{self.log_file}.{index + 1}")
+            os.replace(self.log_file, f"{self.log_file}.1")
+        except OSError:
+            pass
 
     def preflight_proxy(self) -> Dict[str, Any]:
         cfg = self.config_mgr.config["proxy"]
         host = cfg.get("host", "127.0.0.1")
         port = cfg.get("port", 7890)
-        timeout = cfg.get("timeout_ms", 1500)
+        timeout = cfg.get("timeout_ms", DEFAULT_PROXY_TIMEOUT_MS)
 
         reachable, latency, msg = probe_tcp_port(host, port, timeout_ms=timeout)
         return {
@@ -231,7 +290,10 @@ class LauncherEngine:
                 stopped, stop_message = self.stop_antigravity()
                 if not stopped:
                     return False, stop_message
-                time.sleep(0.2)
+                if not self._wait_for_antigravity_exit():
+                    msg = "旧 Antigravity 进程未在安全期限内退出，已取消重启以避免产生并行会话"
+                    self.log(msg, "ERROR")
+                    return False, msg
             else:
                 msg = f"Antigravity 已经在运行中 (PID: {anti_info['pids']})。如需重启请点击【重启】。"
                 self.log(msg, "WARN")
@@ -250,10 +312,7 @@ class LauncherEngine:
             env["ANTIGRAVITY_REAL_NPX"] = anti_info["npx_path"]
             env["PATH"] = f"{self.shims_dir};{env.get('PATH', '')}"
             bootstrap_path = self.node_bootstrap.replace("\\", "/")
-            node_req = f'--require="{bootstrap_path}"'
-            existing_opts = env.get("NODE_OPTIONS", "")
-            if "node-proxy-bootstrap.cjs" not in existing_opts:
-                env["NODE_OPTIONS"] = f"{existing_opts} {node_req}".strip()
+            env["NODE_OPTIONS"] = _merge_node_options(env.get("NODE_OPTIONS", ""), bootstrap_path)
             self.log(f"已装载浏览器 DevTools 代理扩展支持 (Node: {anti_info['node_path']})", "INFO")
         else:
             self.log("跳过浏览器扩展代理补丁 (Node/npx 未检测到或已禁用)", "WARN")
@@ -312,6 +371,21 @@ class LauncherEngine:
 
     def restart_antigravity(self) -> Tuple[bool, str]:
         return self.launch_antigravity(force_restart=True)
+
+    @staticmethod
+    def _wait_for_antigravity_exit(timeout: float = 4.0) -> bool:
+        """Wait for the old Electron root to release before relaunching.
+
+        Mirrors the Codex restart guard: relaunching into a tree that is
+        still dying makes the new instance defer to the old single-instance
+        lock and exit immediately.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if not get_antigravity_process_info()["running"]:
+                return True
+            time.sleep(0.1)
+        return not get_antigravity_process_info()["running"]
 
     # ==========================================
     # Codex (ChatGPT) Controls

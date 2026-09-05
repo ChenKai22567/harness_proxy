@@ -5,9 +5,14 @@ import unittest
 from unittest import mock
 
 from core.config_manager import ConfigManager
-from core.launcher_engine import LauncherEngine
+from core.launcher_engine import LauncherEngine, _merge_node_options
 from core.process_classifier import classify_process
-from core.process_detector import get_codex_process_info, terminate_process_tree
+from core.process_detector import (
+    _proxy_value_matches,
+    find_node_and_npx,
+    get_codex_process_info,
+    terminate_process_tree,
+)
 
 
 def make_engine(root: str, *, allow_process_control: bool = False) -> LauncherEngine:
@@ -459,6 +464,143 @@ class ConfigMigrationTests(unittest.TestCase):
             config = ConfigManager(path)
             self.assertEqual(config.config["proxy"]["preset"], "Clash / Mihomo (7890)")
             self.assertTrue(config.config["apps"]["codex"]["components"]["websocket_proxy"])
+
+
+class ProxyValueMatchTests(unittest.TestCase):
+    def test_trailing_port_must_match_exactly(self):
+        self.assertTrue(_proxy_value_matches("127.0.0.1:7890", 7890))
+        self.assertTrue(_proxy_value_matches("http://127.0.0.1:7890", 7890))
+        self.assertTrue(_proxy_value_matches("socks://[::1]:7890", 7890))
+        self.assertFalse(_proxy_value_matches("127.0.0.1:78901", 7890))
+        self.assertFalse(_proxy_value_matches("127.0.0.1:7891", 7890))
+        self.assertFalse(_proxy_value_matches("", 7890))
+
+
+class NodeOptionsTests(unittest.TestCase):
+    def test_bootstrap_require_replaces_stale_install_paths(self):
+        new_path = "C:/new/assets/node-proxy-bootstrap.cjs"
+        self.assertEqual(_merge_node_options("", new_path), f'--require="{new_path}"')
+        self.assertEqual(
+            _merge_node_options('--require="C:/old/assets/node-proxy-bootstrap.cjs"', new_path),
+            f'--require="{new_path}"',
+        )
+        self.assertEqual(
+            _merge_node_options(f'--require="{new_path}"', new_path),
+            f'--require="{new_path}"',
+        )
+
+    def test_unrelated_requires_are_preserved(self):
+        new_path = "C:/new/assets/node-proxy-bootstrap.cjs"
+        other = '--require="./other-hook.cjs"'
+        merged = _merge_node_options(
+            f"{other} --require=\"C:/old/assets/node-proxy-bootstrap.cjs\"", new_path
+        )
+        self.assertEqual(merged, f'{other} --require="{new_path}"')
+
+
+class ShimExclusionTests(unittest.TestCase):
+    def test_sibling_directory_is_not_treated_as_shim(self):
+        with tempfile.TemporaryDirectory() as root:
+            shims = os.path.join(root, "shims")
+            sibling = os.path.join(root, "shims2")
+            os.makedirs(shims)
+            os.makedirs(sibling)
+            for directory in (shims, sibling):
+                with open(os.path.join(directory, "npx.cmd"), "w", encoding="utf-8") as handle:
+                    handle.write("@echo off\n")
+
+            def fake_which(candidate_path):
+                return lambda name: None if name == "node" else candidate_path
+
+            with mock.patch(
+                "core.process_detector.shutil.which", fake_which(os.path.join(sibling, "npx.cmd"))
+            ):
+                info = find_node_and_npx("", shims)
+            self.assertTrue(info["npx_found"])
+            self.assertEqual(os.path.normcase(info["npx_path"]), os.path.normcase(os.path.join(sibling, "npx.cmd")))
+
+            with mock.patch(
+                "core.process_detector.shutil.which", fake_which(os.path.join(shims, "npx.cmd"))
+            ):
+                info = find_node_and_npx("", shims)
+            self.assertFalse(info["npx_found"])
+
+
+class ConfigRoundtripTests(unittest.TestCase):
+    def test_unknown_keys_survive_save_and_reload(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "config.json")
+            config = ConfigManager(path)
+            config.config["custom_section"] = {"keep": True}
+            config.config["proxy"]["timeout_ms"] = 3000
+            self.assertTrue(config.save())
+
+            reloaded = ConfigManager(path)
+            self.assertEqual(reloaded.config["custom_section"], {"keep": True})
+            self.assertEqual(reloaded.config["proxy"]["timeout_ms"], 3000)
+
+
+class LogRotationTests(unittest.TestCase):
+    def test_log_rotates_once_size_exceeds_cap(self):
+        from core import launcher_engine
+
+        with tempfile.TemporaryDirectory() as root:
+            log_path = os.path.join(root, "launcher.log")
+            config = ConfigManager(os.path.join(root, "config.json"))
+            with mock.patch("core.launcher_engine.find_antigravity_executable", return_value=None), \
+                 mock.patch("core.launcher_engine.find_node_and_npx", return_value={}), \
+                 mock.patch("core.launcher_engine.find_codex_executable", return_value=(None, None)), \
+                 mock.patch("builtins.print"):
+                engine = LauncherEngine(config, allow_process_control=False, log_file=log_path)
+                # Rotation is checked before each append: the first entry
+                # pushes the file over the cap, the second one triggers it.
+                big = "x" * launcher_engine.LOG_ROTATE_BYTES
+                engine.log(big, "INFO")
+                engine.log(big, "INFO")
+
+            self.assertTrue(os.path.exists(log_path + ".1"))
+            self.assertTrue(os.path.exists(log_path))
+
+
+class AntigravityRestartTests(unittest.TestCase):
+    def _preflight(self):
+        return {
+            "exe_found": True, "exe_path": r"C:\Anti\Antigravity.exe",
+            "running": True, "pids": [701],
+            "node_found": False, "npx_found": False,
+        }
+
+    def test_restart_cancels_if_old_root_has_not_exited(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = make_engine(root, allow_process_control=True)
+            with mock.patch.object(engine, "preflight_proxy", return_value={"reachable": True}), \
+                 mock.patch.object(engine, "preflight_antigravity", return_value=self._preflight()), \
+                 mock.patch.object(engine, "stop_antigravity", return_value=(True, "stopped")), \
+                 mock.patch.object(engine, "_wait_for_antigravity_exit", return_value=False), \
+                 mock.patch("core.launcher_engine.subprocess.Popen") as spawn:
+                ok, message = engine.launch_antigravity(force_restart=True)
+
+            self.assertFalse(ok)
+            self.assertIn("取消重启", message)
+            spawn.assert_not_called()
+
+    def test_restart_spawns_replacement_after_old_root_exits(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = make_engine(root, allow_process_control=True)
+            fake_process = mock.Mock(pid=5678)
+            fake_process.poll.return_value = None
+            with mock.patch.object(engine, "preflight_proxy", return_value={"reachable": True}), \
+                 mock.patch.object(engine, "preflight_antigravity", return_value=self._preflight()), \
+                 mock.patch.object(engine, "stop_antigravity", return_value=(True, "stopped")), \
+                 mock.patch.object(engine, "_wait_for_antigravity_exit", return_value=True), \
+                 mock.patch("core.launcher_engine.subprocess.Popen", return_value=fake_process) as spawn, \
+                 mock.patch("core.launcher_engine.time.sleep"), \
+                 mock.patch.object(engine.supervisor, "register_launch"):
+                ok, _ = engine.launch_antigravity(force_restart=True)
+
+            self.assertTrue(ok)
+            spawn.assert_called_once()
+            self.assertEqual(spawn.call_args.args[0][0], r"C:\Anti\Antigravity.exe")
 
 
 if __name__ == "__main__":

@@ -56,15 +56,14 @@ class SingleInstanceTests(unittest.TestCase):
         # Isolate this regression check from a real packaged instance that may
         # legitimately hold the production mutex while the tests are running.
         test_mutex = f"Local\\HarnessProxyLauncher.Test.{uuid.uuid4()}"
-        with mock.patch("main.SINGLE_INSTANCE_MUTEX", test_mutex):
-            first = SingleInstanceGuard()
-            second = SingleInstanceGuard()
-            try:
-                self.assertTrue(first.acquire())
-                self.assertFalse(second.acquire())
-            finally:
-                second.close()
-                first.close()
+        first = SingleInstanceGuard(test_mutex)
+        second = SingleInstanceGuard(test_mutex)
+        try:
+            self.assertTrue(first.acquire())
+            self.assertFalse(second.acquire())
+        finally:
+            second.close()
+            first.close()
 
 
 class ReleasePublishingTests(unittest.TestCase):
@@ -92,7 +91,6 @@ class ReleasePublishingTests(unittest.TestCase):
             _publish_release(
                 new_release,
                 final_release,
-                staging_root,
                 stop_running_instances=False,
             )
 

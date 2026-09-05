@@ -1,10 +1,9 @@
 import os
 import sys
 import ctypes
-import time
-from ctypes import wintypes
 
-# Enable High-DPI awareness on Windows for crisp fonts and borders
+# Harness代理启动 is Windows-only by design (winreg, ctypes.windll, the win32
+# tray backend); the DPI call below is the first of those dependencies.
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per-monitor DPI aware
 except Exception:
@@ -18,66 +17,9 @@ APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 if APP_ROOT not in sys.path:
     sys.path.insert(0, APP_ROOT)
 
-import socket
+# Re-exported so existing imports and tests keep working against ``main``.
+from core.single_instance import SingleInstanceGuard, notify_existing_instance
 
-SINGLE_INSTANCE_PORT = 47891
-SINGLE_INSTANCE_MUTEX = "Local\\HarnessProxyLauncher.SingleInstance"
-
-
-class SingleInstanceGuard:
-    """Process-lifetime Windows mutex that cannot disappear with a UI thread."""
-
-    ERROR_ALREADY_EXISTS = 183
-
-    def __init__(self):
-        self._handle = None
-
-    def acquire(self) -> bool:
-        if os.name != "nt":
-            return True
-
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
-        kernel32.CreateMutexW.restype = wintypes.HANDLE
-        kernel32.SetLastError(0)
-        handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX)
-        if not handle:
-            # Do not make an OS API failure prevent the application from opening;
-            # the loopback wake-up channel remains a secondary guard.
-            return True
-
-        if kernel32.GetLastError() == self.ERROR_ALREADY_EXISTS:
-            kernel32.CloseHandle(handle)
-            return False
-
-        self._handle = handle
-        return True
-
-    def close(self):
-        if self._handle and os.name == "nt":
-            try:
-                ctypes.windll.kernel32.CloseHandle(self._handle)
-            finally:
-                self._handle = None
-
-def notify_existing_instance(attempts: int = 8) -> bool:
-    """Wake the existing window without making a second launch feel hung.
-
-    A very early second click can arrive while the first process owns the mutex
-    but has not bound its loopback listener yet.  Short bounded retries cover
-    that startup race without ever blocking Explorer for several seconds.
-    """
-    for attempt in range(max(1, attempts)):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.15)
-                s.connect(('127.0.0.1', SINGLE_INSTANCE_PORT))
-                s.sendall(b'WAKEUP\n')
-                return True
-        except OSError:
-            if attempt + 1 < attempts:
-                time.sleep(0.08)
-    return False
 
 def main():
     guard = SingleInstanceGuard()

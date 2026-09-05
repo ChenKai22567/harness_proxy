@@ -1,8 +1,91 @@
 import tkinter as tk
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
+
+
+def draw_straight_glyph(draw, kind: str, color, size: int = 20, line_width: int = 2):
+    """Draw the launcher's angular check/cross glyph onto a PIL image.
+
+    The dropdown menu and the status chips share this exact two-segment
+    geometry, so the mark is guaranteed to look the same everywhere.
+    """
+    if kind == "check":
+        draw.line((3, 10, 7, 14), fill=color, width=line_width)
+        draw.line((7, 14, 17, 4), fill=color, width=line_width)
+    else:  # cross
+        draw.line((4, 4, 16, 16), fill=color, width=line_width)
+        draw.line((16, 4, 4, 16), fill=color, width=line_width)
+
+
+def create_status_glyph_image(kind: str, color, display_size: int = 10) -> ctk.CTkImage:
+    """Render one angular glyph as a CTkImage for use inside labels."""
+    canvas = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    draw_straight_glyph(ImageDraw.Draw(canvas), kind, color)
+    return ctk.CTkImage(light_image=canvas, dark_image=canvas, size=(display_size, display_size))
+
+
+def render_straight_glyph_photo(box_size: int, color: str) -> ImageTk.PhotoImage:
+    """Rasterise the dropdown-style check at native pixel size.
+
+    PIL draws both arms as exact 45-degree whole-pixel segments with a filled
+    joint, avoiding the canvas polyline MITER artefacts (bent arm, offset
+    joint) that appear around fractional scaling factors.
+    """
+    image = Image.new("RGBA", (box_size, box_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    unit = box_size / 20.0
+    arm = max(3, round(4 * unit))        # short arm step (down-right)
+    long_arm = max(6, round(10 * unit))  # long arm step (up-right)
+    elbow_x = max(arm, (box_size - (arm + long_arm)) // 2 + arm)
+    elbow_y = max(long_arm, (box_size - long_arm) // 2 + long_arm)
+    draw.line(
+        [
+            (elbow_x - arm, elbow_y - arm),
+            (elbow_x, elbow_y),
+            (elbow_x + long_arm, elbow_y - long_arm),
+        ],
+        fill=color,
+        width=max(2, round(2 * unit)),
+        joint="curve",
+    )
+    return ImageTk.PhotoImage(image)
+
+
+def _install_crisp_geometry_patch():
+    """Snap DrawEngine geometry to whole pixels under fractional DPI factors.
+
+    At 160% scaling every 1 px card border becomes a 1.604 px polygon stroke.
+    Tk's canvas does not anti-alias and rounds each vertex independently, so
+    the border lands on different pixels on every edge and dense card layouts
+    (the component dialog) read as fuzzy.  Rounding the engine inputs keeps
+    the vertices on whole pixels; colours and canvas tags are untouched.
+    customtkinter is pinned to 6.0.0, so this signature is stable.
+    """
+    original = ctk.DrawEngine.draw_rounded_rect_with_border
+    if getattr(original, "_crisp_snapped", False):
+        return
+
+    def snapped(self, width, height, corner_radius, border_width, *args, **kwargs):
+        # border_width == 0 means "no border" and must stay 0; only fractional
+        # positive widths (1.604 px at 160% DPI) snap down to a whole pixel.
+        snapped_border = border_width if not border_width else max(1, int(border_width))
+        return original(
+            self,
+            round(width),
+            round(height),
+            round(corner_radius),
+            snapped_border,
+            *args,
+            **kwargs,
+        )
+
+    snapped._crisp_snapped = True
+    ctk.DrawEngine.draw_rounded_rect_with_border = snapped
+
+
+_install_crisp_geometry_patch()
 
 
 class PolishedComboBox(ctk.CTkComboBox):
@@ -77,12 +160,13 @@ class PolishedComboBox(ctk.CTkComboBox):
         """Build a straight two-segment check and an equal-size spacer."""
         size = 20
         selected = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(selected)
-        color = self._apply_appearance_mode(self._menu_active_text_color)
         # Draw the two strokes separately: no curved font outline and no
         # rounded joint interpolation between the short and long segments.
-        draw.line((3, 10, 7, 14), fill=color, width=2)
-        draw.line((7, 14, 17, 4), fill=color, width=2)
+        draw_straight_glyph(
+            ImageDraw.Draw(selected),
+            "check",
+            self._apply_appearance_mode(self._menu_active_text_color),
+        )
         empty = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         return (
             ctk.CTkImage(light_image=selected, dark_image=selected, size=(10, 10)),
@@ -500,3 +584,132 @@ class PolishedComboBox(ctk.CTkComboBox):
             self._canvas.tag_raise("polished_chevron")
         except tk.TclError:
             pass
+
+
+class CrispCheckBox(ctk.CTkCheckBox):
+    """Standard rectangular checkbox with an integer-pixel rendering.
+
+    The stock draw engine multiplies every geometry by the display scaling
+    factor (1.604 at 160% DPI), so the 18 px box becomes a 28.9 px canvas with
+    a 1.6 px polygon border and a round-capped check whose vertices all carry
+    fractions.  Tk's canvas does not anti-alias and rounds each vertex
+    independently, which reads as a wobbly rounded box with a fuzzy check.
+    This subclass repaints the box itself with integer-coordinate rectangles
+    and draws the same two-segment straight check as the dropdown menu, while
+    keeping CTkCheckBox's variable/command/text/hover behaviour.
+    """
+
+    # Class attribute: CTkCheckBox.__init__ calls _draw() before subclass
+    # instance attributes exist, so the hover flag must already resolve.
+    _hovering = False
+
+    def __init__(self, *args, **kwargs):
+        # corner_radius stays accepted for call-site compatibility but is
+        # deliberately unused: the box is drawn as a true rectangle.
+        super().__init__(*args, **kwargs)
+
+    def _box_pixel_size(self):
+        scaled_width = self._apply_widget_scaling(self._checkbox_width)
+        scaled_height = self._apply_widget_scaling(self._checkbox_height)
+        width = max(3, round(scaled_width))
+        height = max(3, round(scaled_height))
+        if self._checkbox_width == self._checkbox_height:
+            # The box is designed square; rounding the two scaled values
+            # independently could still yield W != H at fractional DPI.
+            height = width
+        return width, height
+
+    def _draw(self, no_color_updates=False):
+        width, height = self._box_pixel_size()
+        canvas = self._canvas
+        try:
+            if int(float(canvas.cget("width"))) != width or int(float(canvas.cget("height"))) != height:
+                canvas.configure(width=width, height=height)
+            canvas.delete("border_parts", "inner_parts", "checkmark", "crisp_parts")
+
+            background = self._apply_appearance_mode(self._bg_color)
+            if self._check_state:
+                fill = self._fg_color
+                if self._hovering and self._state == tk.NORMAL:
+                    fill = self._hover_color
+                if self._state == tk.DISABLED:
+                    fill = self._border_color
+                fill = self._apply_appearance_mode(fill)
+                self._draw_rounded_fill(canvas, width, height, fill)
+                mark = background if self._state == tk.DISABLED else self._checkmark_color
+                self._draw_straight_mark(canvas, width, height, self._apply_appearance_mode(mark))
+            else:
+                border = self._border_color
+                if self._hovering and self._state == tk.NORMAL:
+                    border = self._fg_color
+                self._draw_rounded_outline(
+                    canvas, width, height, self._apply_appearance_mode(border), background
+                )
+            canvas.configure(bg=background)
+            if self._bg_canvas is not None:
+                self._bg_canvas.configure(bg=background)
+            if self._text_label is not None:
+                if self._state == tk.DISABLED:
+                    text_color = self._text_color_disabled
+                else:
+                    text_color = self._text_color
+                self._text_label.configure(
+                    fg=self._apply_appearance_mode(text_color),
+                    bg=background,
+                )
+        except tk.TclError:
+            pass
+
+    def _draw_rounded_fill(self, canvas, width: int, height: int, color: str):
+        """Solid fill with a ~2 px corner cut, every coordinate an integer."""
+        canvas.create_rectangle(2, 0, width - 3, height - 1, fill=color, outline=color, tags=("crisp_parts",))
+        canvas.create_rectangle(0, 2, width - 1, height - 3, fill=color, outline=color, tags=("crisp_parts",))
+        canvas.create_rectangle(1, 1, width - 2, height - 2, fill=color, outline=color, tags=("crisp_parts",))
+
+    def _draw_rounded_outline(self, canvas, width: int, height: int, color: str, background: str):
+        """1 px outline with a ~2 px corner cut, every coordinate an integer."""
+        fill = background
+        canvas.create_rectangle(2, 0, width - 3, height - 1, fill=fill, outline=fill, tags=("crisp_parts",))
+        canvas.create_rectangle(0, 2, width - 1, height - 3, fill=fill, outline=fill, tags=("crisp_parts",))
+        canvas.create_rectangle(1, 1, width - 2, height - 2, fill=fill, outline=fill, tags=("crisp_parts",))
+        edges = (
+            (2, 0, width - 3, 0),
+            (2, height - 1, width - 3, height - 1),
+            (0, 2, 0, height - 3),
+            (width - 1, 2, width - 1, height - 3),
+        )
+        for x0, y0, x1, y1 in edges:
+            canvas.create_line(x0, y0, x1, y1, fill=color, tags=("crisp_parts",))
+        # One pixel per corner joins the two edges across the cut corner.
+        # Anything more lands inside the cut-out and reads as a stray dot.
+        corner_pixels = (
+            (1, 1),
+            (width - 2, 1),
+            (1, height - 2),
+            (width - 2, height - 2),
+        )
+        for x, y in corner_pixels:
+            canvas.create_rectangle(x, y, x, y, fill=color, outline=color, tags=("crisp_parts",))
+
+    def _draw_straight_mark(self, canvas, width: int, height: int, color: str):
+        photo = self._get_mark_photo(width, color)
+        self._active_mark_photo = photo  # prevent Tk image garbage collection
+        canvas.create_image(width // 2, height // 2, image=photo, tags=("crisp_parts",))
+
+    def _get_mark_photo(self, box_size: int, color: str) -> ImageTk.PhotoImage:
+        cache: Dict[Tuple[int, str], ImageTk.PhotoImage] = getattr(self, "_mark_photo_cache", None)
+        if cache is None:
+            cache = self._mark_photo_cache = {}
+        key = (box_size, color)
+        if key not in cache:
+            cache[key] = render_straight_glyph_photo(box_size, color)
+        return cache[key]
+
+    def _on_enter(self, event=0):
+        if self._hover is True and self._state == tk.NORMAL:
+            self._hovering = True
+            self._draw()
+
+    def _on_leave(self, event=0):
+        self._hovering = False
+        self._draw()

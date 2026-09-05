@@ -5,12 +5,25 @@ from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 import customtkinter as ctk
 
-from core.config_manager import ConfigManager, get_app_root_dir, get_resource_path
+from core.config_manager import (
+    DEFAULT_PROXY_TIMEOUT_MS,
+    ConfigManager,
+    get_app_root_dir,
+    get_resource_path,
+)
 from core.launcher_engine import LauncherEngine
 from core.proxy_prober import probe_tcp_port
 from core.process_detector import get_process_snapshot_entries, process_map_from_entries
+from core.single_instance import start_wakeup_server
+from gui.native_window import (
+    apply_native_surface_guards,
+    create_solid_background_brush,
+    delete_background_brush,
+    force_native_repaint,
+)
+from gui.theme import *  # noqa: F401,F403 - shared design tokens
 from gui.tray_manager import TrayManager
-from gui.widgets import PolishedComboBox
+from gui.widgets import PolishedComboBox, create_status_glyph_image
 
 # Standardize theme to system light mode
 ctk.set_appearance_mode("Light")
@@ -19,53 +32,6 @@ ctk.set_default_color_theme("blue")
 # Windows graphics/font stacks. Polygon rendering avoids hundreds of glyph
 # operations per repaint and stays visually crisp at the sizes used here.
 ctk.DrawEngine.preferred_drawing_method = "polygon_shapes"
-
-# Windows-aligned neutral light theme. Colour is reserved for compact status
-# feedback; surfaces and controls stay within one cool-grey family.
-FONT_FAMILY = "Microsoft YaHei UI"
-
-COLOR_BG = "#F3F3F3"
-COLOR_CARD_BG = "#FFFFFF"
-COLOR_CARD_SOFT = "#F7F7F7"
-COLOR_CARD_HOVER = "#F0F0F0"
-COLOR_CARD_BORDER = "#E1E1E1"
-COLOR_BORDER_STRONG = "#C7C7C7"
-
-COLOR_TEXT_HEADING = "#1F1F1F"
-COLOR_TEXT_PRIMARY = "#242424"
-COLOR_TEXT_SECTION = "#3A3A3A"
-COLOR_TEXT_MUTED = "#666666"
-COLOR_TEXT_SUBTLE = "#8A8A8A"
-
-COLOR_ACCENT = "#3B3B3B"
-COLOR_ACCENT_HOVER = "#2F2F2F"
-COLOR_ACCENT_SOFT = "#EEEEEE"
-
-COLOR_SUCCESS = "#0AA36D"          # --type-manufacture: #0aa36d (refined emerald green)
-COLOR_SUCCESS_HOVER = "#088A5C"
-COLOR_SUCCESS_BG = "#E7F7F0"
-COLOR_SUCCESS_TEXT = "#0A8055"
-
-COLOR_WARN = "#F28A00"             # --city: #f28a00 (warm tech amber)
-COLOR_WARN_BG = "#FFF7EB"
-COLOR_WARN_TEXT = "#B45309"
-
-COLOR_ERROR = "#D95765"            # --policy-data-red: #d95765 (soft rose-red)
-COLOR_ERROR_BG = "#FDF0F1"
-COLOR_ERROR_BORDER = "#F8CCD1"
-COLOR_ERROR_TEXT = "#C53041"
-COLOR_ERROR_HOVER = "#FCE1E4"
-
-COLOR_INACTIVE_BG = "#EEEEEE"
-COLOR_INACTIVE_TEXT = "#808080"
-
-COLOR_LOG_BG = "#F7F8FA"
-COLOR_LOG_BORDER = "#E1E5EA"
-COLOR_LOG_TEXT = "#263548"
-COLOR_LOG_CONTROL = "#EEF1F4"
-COLOR_LOG_CONTROL_HOVER = "#E2E6EA"
-COLOR_SCROLLBAR = "#C8D0DA"
-COLOR_SCROLLBAR_HOVER = "#AEB8C5"
 
 MAX_VISIBLE_LOG_LINES = 600
 
@@ -534,14 +500,35 @@ class MainWindow(ctk.CTk):
         )
         self.codex_path_lbl.pack(fill="x", padx=14, pady=(0, 2))
 
+        self.codex_conn_row = ctk.CTkFrame(self.codex_card, fg_color="transparent")
+        self.codex_conn_row.pack(fill="x", padx=14, pady=(0, 6))
+
         self.codex_conn_lbl = ctk.CTkLabel(
-            self.codex_card,
+            self.codex_conn_row,
             text="网络模式: 独立混合端口代理",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
             text_color=COLOR_TEXT_MUTED,
             anchor="w"
         )
-        self.codex_conn_lbl.pack(fill="x", padx=14, pady=(0, 6))
+        self.codex_conn_lbl.pack(side="left")
+
+        # Angular status glyphs drawn exactly like the dropdown menu check;
+        # Unicode "✓/×" font glyphs look different and render softly.
+        self._codex_layer_check = create_status_glyph_image("check", COLOR_SUCCESS_TEXT)
+        self._codex_layer_cross = create_status_glyph_image("cross", COLOR_WARN_TEXT)
+        self._codex_layer_chips = []
+        for layer_name in ("浏览器", "API", "WebSocket"):
+            chip = ctk.CTkFrame(self.codex_conn_row, fg_color="transparent")
+            ctk.CTkLabel(
+                chip,
+                text=layer_name,
+                font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+                text_color=COLOR_TEXT_MUTED,
+            ).pack(side="left")
+            icon_lbl = ctk.CTkLabel(chip, image=self._codex_layer_check, text="")
+            icon_lbl.pack(side="left", padx=(2, 0))
+            self._codex_layer_chips.append((chip, icon_lbl))
+            chip.pack_forget()
 
         codex_btn_row = ctk.CTkFrame(self.codex_card, fg_color="transparent")
         codex_btn_row.pack(fill="x", padx=14, pady=(2, 10))
@@ -738,10 +725,12 @@ class MainWindow(ctk.CTk):
             if refresh_paths:
                 self.engine.refresh_cached_paths()
 
-            p_cfg = self.config_mgr.config.get("proxy", {})
+            # snapshot() isolates the worker from in-place edits the UI thread
+            # performs while saving (preset switch, settings dialog).
+            p_cfg = self.config_mgr.snapshot().get("proxy", {})
             host = p_cfg.get("host", "127.0.0.1")
             port = p_cfg.get("port", 7890)
-            timeout = p_cfg.get("timeout_ms", 1000)
+            timeout = p_cfg.get("timeout_ms", DEFAULT_PROXY_TIMEOUT_MS)
             proxy_ok, latency, msg = probe_tcp_port(host, port, timeout)
 
             process_entries = get_process_snapshot_entries()
@@ -894,13 +883,14 @@ class MainWindow(ctk.CTk):
                     text_color=COLOR_SUCCESS_TEXT if codex_info["has_proxy"] else COLOR_WARN_TEXT,
                     fg_color=COLOR_SUCCESS_BG if codex_info["has_proxy"] else COLOR_WARN_BG,
                 )
-                layer_text = " / ".join((
-                    f"浏览器{'✓' if codex_info.get('browser_proxy') else '×'}",
-                    f"API{'✓' if codex_info.get('api_proxy') else '×'}",
-                    f"WebSocket{'✓' if (codex_info.get('websocket_proxy') or codex_info.get('system_proxy', {}).get('matches')) else '×'}",
+                ws_ready = bool(codex_info.get("websocket_proxy")) or codex_info.get("system_proxy", {}).get("matches", False)
+                self._set_codex_layer_chips((
+                    ("浏览器", bool(codex_info.get("browser_proxy"))),
+                    ("API", bool(codex_info.get("api_proxy"))),
+                    ("WebSocket", ws_ready),
                 ))
                 self.codex_conn_lbl.configure(
-                    text=f"{owner_text}会话: 主 PID {main_pid} · {layer_text}"
+                    text=f"{owner_text}会话: 主 PID {main_pid}"
                          + ("" if managed else " · 重启/终止时确认接管"),
                     text_color=COLOR_SUCCESS_TEXT if codex_info["has_proxy"] else COLOR_WARN_TEXT,
                 )
@@ -909,6 +899,7 @@ class MainWindow(ctk.CTk):
                 self.codex_stop_btn.configure(state="normal")
             else:
                 residual_pids = codex_info.get("residual_pids", [])
+                self._set_codex_layer_chips(None)
                 if residual_pids:
                     self.codex_status_badge.configure(
                         text=f"已退出 · {len(residual_pids)}个残留",
@@ -925,6 +916,24 @@ class MainWindow(ctk.CTk):
                 self.codex_launch_btn.configure(text="专用启动", state="normal", fg_color=COLOR_SUCCESS, text_color="#FFFFFF")
                 self.codex_restart_btn.configure(state="disabled")
                 self.codex_stop_btn.configure(state="disabled")
+
+    def _set_codex_layer_chips(self, layer_states):
+        """Show the three angular layer glyphs next to the session line.
+
+        ``None`` hides them (application not running); otherwise an iterable
+        of ``(layer_name, proxy_active)`` triples is expected.
+        """
+        if len(self._codex_layer_chips) != 3:
+            return
+        for index, (chip_frame, icon_label) in enumerate(self._codex_layer_chips):
+            if layer_states is None:
+                chip_frame.pack_forget()
+                continue
+            _name, active = layer_states[index]
+            icon_label.configure(
+                image=self._codex_layer_check if active else self._codex_layer_cross
+            )
+            chip_frame.pack(side="left", padx=(8, 0))
 
     # ==========================================
     # Actions & Handlers
@@ -1077,6 +1086,7 @@ class MainWindow(ctk.CTk):
                 self.config_mgr,
                 on_save_callback=self._on_settings_saved,
                 on_close_callback=self._on_settings_closed,
+                worker_executor=self._executor,
             )
         except Exception as exc:
             self._settings_dialog = None
@@ -1114,6 +1124,7 @@ class MainWindow(ctk.CTk):
                 app_id=app_id,
                 on_saved=self._on_component_saved,
                 on_close=self._on_component_closed,
+                worker_executor=self._executor,
             )
         except Exception as exc:
             self._component_dialog = None
@@ -1139,18 +1150,39 @@ class MainWindow(ctk.CTk):
                 break
 
     def _check_antigravity_diag(self):
-        info = self.engine.preflight_antigravity()
-        msg = f"【Antigravity 诊断结果】\n\n"
-        msg += f"• 可执行文件: {'已找到' if info['exe_found'] else '未找到'}\n  路径: {info['exe_path']}\n"
-        msg += f"• 运行状态: {'运行中' if info['running'] else '未运行'}\n  PIDs: {info['pids']}\n"
-        if info.get("residual_pids"):
-            msg += f"• 存活残留: {info['residual_pids']}（可在组件管理中清理）\n"
-        if info.get("ignored_pids"):
-            msg += f"• 已终止记录: {info['ignored_pids']}（不计为运行中）\n"
-        msg += f"• 代理参数注入: {'已生效' if info['has_proxy'] else '未挂载/未运行'}\n"
-        msg += f"• Node.js 环境: {'已找到' if info['node_found'] else '未找到'}\n  路径: {info['node_path']}\n"
-        msg += f"• NPX 命令: {'已找到' if info['npx_found'] else '未找到'}\n  路径: {info['npx_path']}\n"
-        messagebox.showinfo("Antigravity 预检诊断", msg, parent=self)
+        # Same async shape as the Codex diagnostic: a full process snapshot
+        # must never run on the UI thread, even though it is usually fast.
+        self.anti_check_btn.configure(state="disabled", text="检测中...")
+
+        def _show_result(result=None, error=None):
+            self.anti_check_btn.configure(state="normal", text="预检诊断")
+            if error:
+                messagebox.showerror("Antigravity 预检诊断", f"诊断失败：\n{error}", parent=self)
+                return
+            info = result
+            msg = f"【Antigravity 诊断结果】\n\n"
+            msg += f"• 可执行文件: {'已找到' if info['exe_found'] else '未找到'}\n  路径: {info['exe_path']}\n"
+            msg += f"• 运行状态: {'运行中' if info['running'] else '未运行'}\n  PIDs: {info['pids']}\n"
+            if info.get("residual_pids"):
+                msg += f"• 存活残留: {info['residual_pids']}（可在组件管理中清理）\n"
+            if info.get("ignored_pids"):
+                msg += f"• 已终止记录: {info['ignored_pids']}（不计为运行中）\n"
+            msg += f"• 代理参数注入: {'已生效' if info['has_proxy'] else '未挂载/未运行'}\n"
+            msg += f"• Node.js 环境: {'已找到' if info['node_found'] else '未找到'}\n  路径: {info['node_path']}\n"
+            msg += f"• NPX 命令: {'已找到' if info['npx_found'] else '未找到'}\n  路径: {info['npx_path']}\n"
+            messagebox.showinfo("Antigravity 预检诊断", msg, parent=self)
+
+        def _run():
+            try:
+                result = self.engine.preflight_antigravity()
+                self._dispatch_ui(lambda: _show_result(result=result))
+            except Exception as exc:
+                self._dispatch_ui(lambda: _show_result(error=str(exc)))
+
+        try:
+            self._executor.submit(_run)
+        except RuntimeError as exc:
+            _show_result(error=str(exc))
 
     def _check_codex_diag(self):
         self.codex_check_btn.configure(state="disabled", text="检测中...")
@@ -1234,98 +1266,35 @@ class MainWindow(ctk.CTk):
     def _apply_native_surface_guards(self):
         """Prevent DWM and Windows GDI from ever displaying a black box during restore.
 
-        1. Strips WS_EX_LAYERED to ensure the window remains a pure standard native window.
-        2. Sets GCLP_HBRBACKGROUND on the window class to a solid brush matching COLOR_BG.
-           so that any GDI background erase is clean and light, never black.
-        3. Sets DWMWA_TRANSITIONS_FORCEDISABLED to True so Windows DWM skips the zoom animation
-           that stretches an uninitialized black DirectX backbuffer from the taskbar button.
+        The Win32 work lives in :mod:`gui.native_window`; this wrapper owns the
+        cached background brush and tolerates being called before the native
+        parent exists.
         """
-        if os.name == "nt":
-            try:
-                import ctypes
-                from ctypes import wintypes
-                child_hwnd = self.winfo_id()
-                parent_hwnd = ctypes.windll.user32.GetParent(child_hwnd)
-                if not parent_hwnd:
-                    return
-
-                # 1. Strip WS_EX_LAYERED
-                GWL_EXSTYLE = -20
-                WS_EX_LAYERED = 0x00080000
-                exstyle = ctypes.windll.user32.GetWindowLongW(parent_hwnd, GWL_EXSTYLE)
-                if exstyle & WS_EX_LAYERED:
-                    ctypes.windll.user32.SetWindowLongW(parent_hwnd, GWL_EXSTYLE, exstyle & ~WS_EX_LAYERED)
-                    ctypes.windll.user32.SetWindowPos(parent_hwnd, 0, 0, 0, 0, 0, 0x0027)
-
-                # 2. Set solid GDI background brush matching COLOR_BG
-                if not hasattr(self, "_native_bg_brush") or not self._native_bg_brush:
-                    r = int(COLOR_BG[1:3], 16)
-                    g = int(COLOR_BG[3:5], 16)
-                    b = int(COLOR_BG[5:7], 16)
-                    colorref = r | (g << 8) | (b << 16)
-                    self._native_bg_brush = ctypes.windll.gdi32.CreateSolidBrush(colorref)
-
-                GCLP_HBRBACKGROUND = -10
-                ctypes.windll.user32.SetClassLongPtrW(parent_hwnd, GCLP_HBRBACKGROUND, self._native_bg_brush)
-                ctypes.windll.user32.SetClassLongPtrW(child_hwnd, GCLP_HBRBACKGROUND, self._native_bg_brush)
-
-                # 3. Disable DWM minimize/restore transition animation
-                DWMWA_TRANSITIONS_FORCEDISABLED = 3
-                val = wintypes.BOOL(True)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    parent_hwnd,
-                    DWMWA_TRANSITIONS_FORCEDISABLED,
-                    ctypes.byref(val),
-                    ctypes.sizeof(val)
-                )
-            except Exception:
-                pass
+        if os.name != "nt":
+            return
+        try:
+            child_hwnd = self.winfo_id()
+            if not getattr(self, "_native_bg_brush", None):
+                self._native_bg_brush = create_solid_background_brush(COLOR_BG)
+            apply_native_surface_guards(child_hwnd, self._native_bg_brush)
+        except Exception:
+            pass
 
     def _force_native_repaint(self):
         """Paint the completed Tk surface before DWM presents a restored frame."""
         if os.name != "nt":
             return
         try:
-            import ctypes
-            child_hwnd = self.winfo_id()
-            parent_hwnd = ctypes.windll.user32.GetParent(child_hwnd) or child_hwnd
-            RDW_INVALIDATE = 0x0001
-            RDW_ERASE = 0x0004
-            RDW_ALLCHILDREN = 0x0080
-            RDW_UPDATENOW = 0x0100
-            ctypes.windll.user32.RedrawWindow(
-                parent_hwnd,
-                None,
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            )
-            ctypes.windll.dwmapi.DwmFlush()
+            force_native_repaint(self.winfo_id())
         except Exception:
             pass
 
     def _start_single_instance_server(self):
-        def _server_loop():
-            import socket
-            try:
-                server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server.bind(('127.0.0.1', 47891))
-                server.listen(5)
-                server.settimeout(1.0)
-                while self.is_running:
-                    try:
-                        conn, _ = server.accept()
-                        data = conn.recv(1024)
-                        conn.close()
-                        if b'WAKEUP' in data:
-                            self._dispatch_ui(self._restore_from_tray)
-                    except socket.timeout:
-                        continue
-                    except OSError:
-                        break
-            except Exception:
-                pass
-        threading.Thread(target=_server_loop, daemon=True).start()
+        start_wakeup_server(
+            is_running=lambda: self.is_running,
+            on_wakeup=lambda: self._dispatch_ui(self._restore_from_tray),
+            on_bind_failed=lambda message: self.engine.log(message, "WARN"),
+        )
 
     def _on_window_close(self):
         minimize_tray = self.config_mgr.config["launcher"].get("minimize_to_tray_on_close", True)
@@ -1389,12 +1358,8 @@ class MainWindow(ctk.CTk):
         if self.tray:
             self.tray.stop()
         if hasattr(self, "_native_bg_brush") and self._native_bg_brush:
-            try:
-                import ctypes
-                ctypes.windll.gdi32.DeleteObject(self._native_bg_brush)
-                self._native_bg_brush = None
-            except Exception:
-                pass
+            delete_background_brush(self._native_bg_brush)
+            self._native_bg_brush = None
         try:
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:

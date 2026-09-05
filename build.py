@@ -38,7 +38,7 @@ def _kill_running_instances():
         time.sleep(0.5)
 
 
-def _publish_release(new_release: str, final_release: str, staging_root: str, stop_running_instances: bool = True):
+def _publish_release(new_release: str, final_release: str, stop_running_instances: bool = True):
     """Replace the release only after a complete build, with rollback on error."""
     if stop_running_instances:
         _kill_running_instances()
@@ -63,6 +63,10 @@ def _publish_release(new_release: str, final_release: str, staging_root: str, st
                 _kill_running_instances()
             time.sleep(0.5)
 
+    # Last resort: the previous release directory is still locked, so merge
+    # into it instead of replacing.  Stale files from the old build survive.
+    print("[WARN] Could not atomically replace the release directory; merged "
+          f"new build into the existing one (stale files may remain): {final_release}")
     shutil.copytree(new_release, final_release, dirs_exist_ok=True)
 
 def build_exe():
@@ -120,7 +124,7 @@ def build_exe():
             raise RuntimeError("PyInstaller completed without producing the expected executable")
 
         _copy_runtime_data(final_release, new_release, default_config)
-        _publish_release(new_release, final_release, staging_root)
+        _publish_release(new_release, final_release)
 
     print("\n[SUCCESS] Build complete! Executable located at:")
     print(os.path.join(final_release, f"{APP_NAME}.exe"))

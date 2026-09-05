@@ -1,5 +1,4 @@
 import os
-import sys
 import shutil
 import re
 import winreg
@@ -245,7 +244,9 @@ def find_node_and_npx(custom_node_path: str = "", shim_dir: str = "") -> Dict[st
             if shim_dir:
                 try:
                     found_abs = os.path.abspath(found).lower()
-                    shim_abs = os.path.abspath(shim_dir).lower()
+                    # Trailing separator keeps a sibling directory such as
+                    # "...\shims2" from being treated as the shim directory.
+                    shim_abs = os.path.abspath(shim_dir).lower().rstrip(os.sep) + os.sep
                     if found_abs.startswith(shim_abs):
                         continue
                 except Exception:
@@ -398,6 +399,9 @@ def _belongs_to_roots(
     return False
 
 
+_PORT_SUFFIX_RE = re.compile(r":(\d{1,5})$")
+
+
 def _proxy_value_matches(value: str, proxy_port: int) -> bool:
     if not value:
         return False
@@ -408,7 +412,10 @@ def _proxy_value_matches(value: str, proxy_port: int) -> bool:
             return True
     except (TypeError, ValueError):
         pass
-    return f":{int(proxy_port)}" in raw
+    # Substring matching would let ":7890" match ":78901"; compare the exact
+    # trailing port instead.
+    match = _PORT_SUFFIX_RE.search(raw)
+    return bool(match) and int(match.group(1)) == int(proxy_port)
 
 
 def get_windows_user_proxy_info(proxy_port: int = 7890) -> Dict[str, Any]:
@@ -582,7 +589,7 @@ def get_codex_process_info(
 
 def terminate_process_tree(
     pids: List[int],
-    timeout: float = 2.0,
+    timeout: float = 1.0,
     *,
     protected_pids: Optional[List[int]] = None,
 ) -> Tuple[int, List[str]]:
@@ -652,7 +659,7 @@ def terminate_process_tree(
 
     if targets:
         try:
-            psutil.wait_procs(list(targets.values()), timeout=max(0.0, min(timeout, 1.0)))
+            psutil.wait_procs(list(targets.values()), timeout=max(0.0, timeout))
         except Exception:
             pass
     return killed_count, errors
