@@ -92,7 +92,7 @@ class MainWindow(ctk.CTk):
         self._last_anti_status = None
         self._last_codex_status = None
         self._last_proxy_status = None
-        self._latest_codex_info = None
+        self._latest_app_info = {"antigravity": None, "codex": None}
         self._settings_dialog = None
         self._component_dialog = None
 
@@ -413,7 +413,7 @@ class MainWindow(ctk.CTk):
             hover_color=COLOR_CARD_HOVER,
             border_width=1,
             border_color=COLOR_CARD_BORDER,
-            command=lambda: self._async_action(self.engine.restart_antigravity)
+            command=lambda: self._request_app_control("antigravity", "restart")
         )
         self.anti_restart_btn.pack(side="left", padx=6)
 
@@ -429,7 +429,7 @@ class MainWindow(ctk.CTk):
             hover_color=COLOR_ERROR_HOVER,
             border_width=1,
             border_color=COLOR_ERROR_BORDER,
-            command=lambda: self._async_action(self.engine.stop_antigravity)
+            command=lambda: self._request_app_control("antigravity", "stop")
         )
         self.anti_stop_btn.pack(side="left", padx=6)
 
@@ -559,7 +559,7 @@ class MainWindow(ctk.CTk):
             hover_color=COLOR_CARD_HOVER,
             border_width=1,
             border_color=COLOR_CARD_BORDER,
-            command=lambda: self._request_codex_control("restart")
+            command=lambda: self._request_app_control("codex", "restart")
         )
         self.codex_restart_btn.pack(side="left", padx=6)
 
@@ -575,7 +575,7 @@ class MainWindow(ctk.CTk):
             hover_color=COLOR_ERROR_HOVER,
             border_width=1,
             border_color=COLOR_ERROR_BORDER,
-            command=lambda: self._request_codex_control("stop")
+            command=lambda: self._request_app_control("codex", "stop")
         )
         self.codex_stop_btn.pack(side="left", padx=6)
 
@@ -764,7 +764,8 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=_monitor_loop, daemon=True).start()
 
     def _apply_status_updates(self, host, port, proxy_ok, latency, msg, anti_info, codex_info):
-        self._latest_codex_info = dict(codex_info)
+        self._latest_app_info["antigravity"] = dict(anti_info)
+        self._latest_app_info["codex"] = dict(codex_info)
         # 1. Update Proxy Status Badge (fixed width, zero layout shift)
         proxy_signature = (host, port, proxy_ok, latency if proxy_ok else msg)
         if proxy_signature != self._last_proxy_status:
@@ -821,12 +822,12 @@ class MainWindow(ctk.CTk):
                 )
                 self.anti_patch_lbl.configure(
                     text=f"{owner_text}会话: 主 PID {main_pid} (共 {num_procs} 个进程)"
-                         + (" · 可安全停止" if managed else " · 接管后可停止/重启"),
+                         + (" · 可安全停止" if managed else " · 重启/终止时确认接管"),
                     text_color=COLOR_SUCCESS_TEXT if managed else COLOR_WARN_TEXT,
                 )
                 self.anti_launch_btn.configure(text="正在运行", state="disabled", fg_color=COLOR_INACTIVE_BG, text_color=COLOR_INACTIVE_TEXT)
-                self.anti_restart_btn.configure(state="normal" if managed else "disabled")
-                self.anti_stop_btn.configure(state="normal" if managed else "disabled")
+                self.anti_restart_btn.configure(state="normal")
+                self.anti_stop_btn.configure(state="normal")
             else:
                 residual_pids = anti_info.get("residual_pids", [])
                 if residual_pids:
@@ -938,45 +939,60 @@ class MainWindow(ctk.CTk):
     # ==========================================
     # Actions & Handlers
     # ==========================================
-    def _request_codex_control(self, action: str):
-        """Keep controls usable while preserving verified process ownership."""
-        info = self._latest_codex_info
+    def _request_app_control(self, app_id: str, action: str):
+        """Keep controls usable while preserving verified process ownership.
+
+        Both applications share this flow: a managed session is controlled
+        directly, an external one is confirmed, then verified and adopted
+        before the operation touches only that root's process tree.
+        """
+        app_label = "Codex (ChatGPT)" if app_id == "codex" else "Antigravity"
+        restart = self.engine.restart_codex if app_id == "codex" else self.engine.restart_antigravity
+        stop = self.engine.stop_codex if app_id == "codex" else self.engine.stop_antigravity
+
+        info = self._latest_app_info.get(app_id)
         if not info or not info.get("running"):
-            self.engine.log("Codex 当前未运行，无法执行该操作。", "WARN")
+            self.engine.log(f"{app_label} 当前未运行，无法执行该操作。", "WARN")
             self._request_lightweight_refresh()
             return
 
         if info.get("managed"):
-            target = self.engine.restart_codex if action == "restart" else self.engine.stop_codex
-            self._async_action(target)
+            self._async_action(restart if action == "restart" else stop)
             return
 
         root_pids = info.get("root_pids") or []
         if not root_pids:
             messagebox.showwarning(
-                "无法确认 Codex 根进程",
-                "检测到 Codex 正在运行，但无法验证应用根进程。请刷新状态后重试，或在组件管理中查看进程详情。",
+                f"无法确认 {app_label} 根进程",
+                f"检测到 {app_label} 正在运行，但无法验证应用根进程。请刷新状态后重试，或在组件管理中查看进程详情。",
                 parent=self,
             )
             return
 
         root_pid = int(root_pids[0])
         verb = "重启" if action == "restart" else "终止"
+        if app_id == "codex":
+            consequence = "当前对话会关闭并重新打开。" if action == "restart" else "当前对话会关闭。"
+        else:
+            consequence = "当前 Antigravity 会关闭并重新打开。" if action == "restart" else "当前 Antigravity 会关闭。"
         if not messagebox.askyesno(
-            f"接管并{verb} Codex",
-            f"当前 Codex 会话由其他启动方式创建，尚未纳入管理。\n\n"
+            f"接管并{verb} {app_label}",
+            f"当前 {app_label} 会话由其他启动方式创建，尚未纳入管理。\n\n"
             f"继续将先验证并接管根进程 PID {root_pid}，随后{verb}该进程及其实际子进程。"
-            f"{'当前对话会关闭并重新打开。' if action == 'restart' else '当前对话会关闭。'}\n\n是否继续？",
+            f"{consequence}\n\n是否继续？",
             parent=self,
         ):
             return
 
         def _adopt_then_control():
             if action == "restart":
-                return self.engine.adopt_and_restart_codex(root_pid)
-            return self.engine.adopt_and_stop("codex", root_pid)
+                adopt_restart = (self.engine.adopt_and_restart_codex
+                                 if app_id == "codex"
+                                 else self.engine.adopt_and_restart_antigravity)
+                return adopt_restart(root_pid)
+            return self.engine.adopt_and_stop(app_id, root_pid)
 
-        _adopt_then_control.__name__ = f"adopt_then_{action}_codex"
+        _adopt_then_control.__name__ = f"adopt_then_{action}_{app_id}"
         self._async_action(_adopt_then_control)
 
     def _async_action(self, func):

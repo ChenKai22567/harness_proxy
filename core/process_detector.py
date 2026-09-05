@@ -284,6 +284,7 @@ def get_antigravity_process_info(
     has_proxy = False
     psutil = _get_psutil()
     root_pids = []
+    root_started: Dict[int, float] = {}
     ignored_pids = []
 
     for pid in candidates:
@@ -297,8 +298,16 @@ def get_antigravity_process_info(
                 str(arg).lower().startswith("--type=") for arg in command_line[1:]
             ):
                 root_pids.append(pid)
+                try:
+                    root_started[pid] = float(process.create_time())
+                except Exception:
+                    root_started[pid] = 0.0
         except Exception:
             ignored_pids.append(pid)
+
+    # Same newest-first rule as the Codex branch: with several external
+    # instances the launcher must target the most recently started root.
+    root_pids.sort(key=lambda pid: root_started.get(pid, 0.0), reverse=True)
 
     pids = [
         pid for pid in candidates

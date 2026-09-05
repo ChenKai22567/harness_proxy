@@ -10,6 +10,7 @@ from core.process_classifier import classify_process
 from core.process_detector import (
     _proxy_value_matches,
     find_node_and_npx,
+    get_antigravity_process_info,
     get_codex_process_info,
     terminate_process_tree,
 )
@@ -32,6 +33,47 @@ def make_engine(root: str, *, allow_process_control: bool = False) -> LauncherEn
 
 
 class ProxyEnvironmentTests(unittest.TestCase):
+    def test_antigravity_roots_are_sorted_newest_first(self):
+        class FakeProcess:
+            def __init__(self, pid, ppid, command):
+                self.pid = pid
+                self._ppid = ppid
+                self._command = command
+
+            def ppid(self):
+                return self._ppid
+
+            def cmdline(self):
+                return list(self._command)
+
+            def status(self):
+                return "running"
+
+            def is_running(self):
+                return True
+
+            def num_threads(self):
+                return 4
+
+            def create_time(self):
+                return float(self.pid)
+
+        processes = {
+            500: FakeProcess(500, 1, ["Antigravity.exe"]),
+            700: FakeProcess(700, 1, ["Antigravity.exe"]),
+        }
+
+        class FakePsutil:
+            @staticmethod
+            def Process(pid):
+                return processes[pid]
+
+        with mock.patch("core.process_detector._get_psutil", return_value=FakePsutil):
+            info = get_antigravity_process_info({"antigravity.exe": [500, 700]})
+
+        self.assertTrue(info["running"])
+        self.assertEqual(info["root_pids"], [700, 500])
+
     def test_codex_proxy_environment_matches_known_good_standard_variables(self):
         stale_proxy_environment = {
             "WS_PROXY": "http://127.0.0.1:9999",
@@ -425,6 +467,37 @@ class SafeProcessControlTests(unittest.TestCase):
 
             self.assertEqual(result, (False, "invalid root"))
             restart.assert_not_called()
+
+    def test_failed_adoption_never_restarts_external_antigravity(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = make_engine(root, allow_process_control=True)
+            with mock.patch.object(
+                engine,
+                "adopt_session",
+                return_value=(False, "invalid root"),
+            ), mock.patch.object(engine, "restart_antigravity") as restart:
+                result = engine.adopt_and_restart_antigravity(801)
+
+            self.assertEqual(result, (False, "invalid root"))
+            restart.assert_not_called()
+
+    def test_confirmed_external_antigravity_is_adopted_before_restart(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = make_engine(root, allow_process_control=True)
+            with mock.patch.object(
+                engine,
+                "adopt_session",
+                return_value=(True, "adopted"),
+            ) as adopt, mock.patch.object(
+                engine,
+                "restart_antigravity",
+                return_value=(True, "restarted"),
+            ) as restart:
+                result = engine.adopt_and_restart_antigravity(801)
+
+            self.assertEqual(result, (True, "restarted"))
+            adopt.assert_called_once_with("antigravity", 801)
+            restart.assert_called_once_with()
 
     def test_residual_cleanup_never_includes_active_tree(self):
         with tempfile.TemporaryDirectory() as root:

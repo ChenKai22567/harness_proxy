@@ -582,10 +582,18 @@ class LauncherEngine:
 
     def adopt_and_restart_codex(self, root_pid: int) -> Tuple[bool, str]:
         """Adopt one verified Codex root before performing a managed restart."""
-        adopted, message = self.adopt_session("codex", root_pid)
+        return self._adopt_and_restart("codex", root_pid)
+
+    def adopt_and_restart_antigravity(self, root_pid: int) -> Tuple[bool, str]:
+        """Adopt one verified Antigravity root before a managed restart."""
+        return self._adopt_and_restart("antigravity", root_pid)
+
+    def _adopt_and_restart(self, app_id: str, root_pid: int) -> Tuple[bool, str]:
+        adopted, message = self.adopt_session(app_id, root_pid)
         if not adopted:
             return False, message
-        return self.restart_codex()
+        restart = self.restart_codex if app_id == "codex" else self.restart_antigravity
+        return restart()
 
     # ==========================================
     # Batch Controls

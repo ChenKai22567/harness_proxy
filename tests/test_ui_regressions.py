@@ -258,10 +258,10 @@ class WindowLifecycleTests(unittest.TestCase):
             self.assertFalse(combo._is_popup_open())
 
             anti_info = {
-                "exe_found": False, "exe_path": None, "running": False,
-                "pids": [], "has_proxy": False, "node_found": False,
-                "npx_found": False, "node_path": "", "managed": False,
-                "owned_pids": [], "residual_pids": [],
+                "exe_found": False, "exe_path": None, "running": True,
+                "pids": [201, 202], "root_pids": [201], "has_proxy": True,
+                "node_found": False, "npx_found": False, "node_path": "",
+                "managed": False, "owned_pids": [], "residual_pids": [],
             }
             codex_info = {
                 "exe_found": True, "exe_path": "ChatGPT.exe", "running": True,
@@ -276,11 +276,28 @@ class WindowLifecycleTests(unittest.TestCase):
             self.assertEqual(str(app.codex_restart_btn.cget("state")), "normal")
             self.assertEqual(str(app.codex_stop_btn.cget("state")), "normal")
             self.assertIn("确认接管", app.codex_conn_lbl.cget("text"))
+            # External Antigravity sessions must behave exactly like Codex:
+            # controls stay usable and route through the confirm-adopt flow.
+            self.assertEqual(str(app.anti_restart_btn.cget("state")), "normal")
+            self.assertEqual(str(app.anti_stop_btn.cget("state")), "normal")
+            self.assertIn("确认接管", app.anti_patch_lbl.cget("text"))
             with mock.patch("gui.main_window.messagebox.askyesno", return_value=True), \
                  mock.patch.object(app, "_async_action") as async_action:
-                app._request_codex_control("restart")
+                app._request_app_control("codex", "restart")
             async_action.assert_called_once()
             self.assertEqual(async_action.call_args.args[0].__name__, "adopt_then_restart_codex")
+
+            with mock.patch("gui.main_window.messagebox.askyesno", return_value=True), \
+                 mock.patch.object(app, "_async_action") as async_action:
+                app._request_app_control("antigravity", "restart")
+            async_action.assert_called_once()
+            self.assertEqual(async_action.call_args.args[0].__name__, "adopt_then_restart_antigravity")
+
+            with mock.patch("gui.main_window.messagebox.askyesno", return_value=True), \
+                 mock.patch.object(app, "_async_action") as async_action:
+                app._request_app_control("antigravity", "stop")
+            async_action.assert_called_once()
+            self.assertEqual(async_action.call_args.args[0].__name__, "adopt_then_stop_antigravity")
 
             app._open_settings()
             app.update()
