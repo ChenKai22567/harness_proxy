@@ -9,6 +9,7 @@ build/
 dist/
 .harness-release-*/
 *.spec
+assets/package-launcher.exe
 
 # Local runtime state
 config.json

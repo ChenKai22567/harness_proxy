@@ -22,6 +22,7 @@ from core.process_detector import (
 )
 from core.process_classifier import collect_component_snapshot
 from core.supervisor import SessionSupervisor
+from core.package_launcher import find_package_identity, launch_packaged
 
 # On-disk log rotation: one active file plus this many rotated backups.
 LOG_ROTATE_BYTES = 1024 * 1024
@@ -489,6 +490,10 @@ class LauncherEngine:
             ]
             if not codex_cfg.get("components", {}).get("gpu_acceleration", True):
                 arguments.append("--disable-gpu")
+            identity = find_package_identity(path)
+            if identity:
+                self.log("使用 Windows 程序包身份启动 Codex，并保留独立代理环境。", "INFO")
+                return launch_packaged(path, arguments[1:], env, identity)
             return subprocess.Popen(
                 arguments,
                 cwd=os.path.dirname(path),

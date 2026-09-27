@@ -7,6 +7,27 @@ import PyInstaller.__main__
 APP_NAME = "HarnessProxyLauncher"
 
 
+def build_package_helper(app_root):
+    """Compile a GUI-subsystem helper so package activation never flashes a console."""
+    import base64
+    import subprocess
+    source = os.path.join(app_root, "assets", "package-launcher.cs")
+    output = os.path.join(app_root, "assets", "package-launcher.exe")
+    quote = lambda value: "'" + value.replace("'", "''") + "'"
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"if (Test-Path -LiteralPath {quote(output)}) {{ Remove-Item -LiteralPath {quote(output)} }}; "
+        f"Add-Type -TypeDefinition (Get-Content -LiteralPath {quote(source)} -Raw) "
+        f"-OutputAssembly {quote(output)} -OutputType WindowsApplication "
+        "-ReferencedAssemblies System.Runtime.Serialization,System.Xml"
+    )
+    powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                              "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                    base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+                   check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+
 def _copy_runtime_data(existing_dir: str, new_dir: str, default_config: str):
     """Carry user-owned runtime data into a freshly built release."""
     existing_config = os.path.join(existing_dir, "config.json")
@@ -71,6 +92,7 @@ def _publish_release(new_release: str, final_release: str, stop_running_instance
 
 def build_exe():
     app_root = os.path.dirname(os.path.abspath(__file__))
+    build_package_helper(app_root)
     dist_dir = os.path.join(app_root, "dist")
     build_dir = os.path.join(app_root, "build")
     icon_path = os.path.join(app_root, "assets", "icon.ico")

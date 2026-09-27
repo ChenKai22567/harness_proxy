@@ -14,6 +14,8 @@
 - **🔍 智能路径与环境发现**：
   - 自动穿透扫描 Antigravity 安装路径。
   - 自动动态解析 Microsoft Store 版 `OpenAI.Codex` (`ChatGPT.exe`)。
+  - 商店版通过 Windows 程序包上下文启动，兼容新版要求的程序包身份，并保留进程级代理参数和环境变量；普通安装版仍直接启动。
+  - 程序包启动辅助组件使用 Windows GUI 子系统；后台 PowerShell 从创建时禁用控制台窗口，启动时不会弹出 PowerShell 窗口。
   - 支持在偏好设置中自由【浏览文件】手动指定任意路径。
   - 内置自包含的 DevTools 代理扩展补丁（`node-proxy-bootstrap.cjs` 与 `shims/`），免外部路径依赖。
 - **📊 实时运行与零流量回环监控**：
@@ -49,6 +51,8 @@
    python -m pip install -r requirements.txt
    python main.py
    ```
+
+商店版 ChatGPT/Codex 需要程序包启动辅助组件。首次运行源码时，执行 `python -c "import os, build; build.build_package_helper(os.getcwd())"` 生成该组件（需要 `requirements-dev.txt` 中的依赖）；运行 `python build.py` 会自动生成并打包它。
 
 ### 方式二：一键创建桌面快捷方式
 在 PowerShell 中执行：
