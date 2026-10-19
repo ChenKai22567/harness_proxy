@@ -169,6 +169,54 @@ def find_antigravity_executable(custom_path: str = "") -> Optional[str]:
 
     return None
 
+def get_antigravity_installation_issues(executable: str) -> List[str]:
+    """Check resources removed/replaced by Electron's Windows updater.
+
+    An exe can survive a stalled update while ICU and the app archive are
+    missing. Launching that image fails before the app can write its own log.
+    Support both the hub's app.asar and the IDE's unpacked resources/app.
+    """
+    root = os.path.dirname(os.path.abspath(executable))
+
+    def nonempty_file(path):
+        try:
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError:
+            return False
+
+    missing = []
+    for relative in (os.path.basename(executable), "icudtl.dat", "resources.pak"):
+        if not nonempty_file(os.path.join(root, relative)):
+            missing.append(relative)
+    if not (
+        nonempty_file(os.path.join(root, "resources", "app.asar"))
+        or nonempty_file(os.path.join(root, "resources", "app", "package.json"))
+    ):
+        missing.append("resources/app.asar 或 resources/app/package.json")
+    return missing
+
+
+def get_antigravity_update_pids() -> List[int]:
+    """Recognize only live installers inside Antigravity's updater cache."""
+    local_app = os.environ.get("LOCALAPPDATA")
+    if not local_app:
+        return []
+    updater_root = os.path.normcase(os.path.abspath(os.path.join(local_app, "antigravity-updater")))
+    names = {"antigravity-x64.exe", "antigravity-arm64.exe", "installer.exe"}
+    psutil = _get_psutil()
+    result = []
+    for pid, _ppid, name, threads in get_process_snapshot_entries():
+        if threads <= 0 or name.lower() not in names:
+            continue
+        try:
+            image = os.path.normcase(os.path.abspath(psutil.Process(pid).exe()))
+            if os.path.commonpath([updater_root, image]) == updater_root:
+                result.append(pid)
+        except (OSError, ValueError, psutil.Error):
+            continue
+    return result
+
+
 def find_codex_executable(custom_path: str = "") -> Tuple[Optional[str], Optional[str]]:
     """
     Finds Codex (ChatGPT) executable via direct registry AppModel lookup.

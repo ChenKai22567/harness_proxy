@@ -17,6 +17,8 @@ from core.process_detector import (
     find_codex_executable,
     find_node_and_npx,
     get_antigravity_process_info,
+    get_antigravity_installation_issues,
+    get_antigravity_update_pids,
     get_codex_process_info,
     terminate_process_tree
 )
@@ -265,6 +267,22 @@ class LauncherEngine:
             "npx_path": node_info.get("npx_path", "")
         }
 
+    def _check_antigravity_launch_ready(self, executable: str) -> Tuple[bool, str]:
+        updater_pids = get_antigravity_update_pids()
+        if updater_pids:
+            return False, (
+                f"Antigravity 更新安装器正在运行 (PID: {updater_pids})，已暂停启动/重启。"
+                "请先在安装窗口完成更新；若提示无法关闭应用，请退出 Antigravity 后点击【重试】。"
+            )
+        missing = get_antigravity_installation_issues(executable)
+        if missing:
+            return False, (
+                f"Antigravity 安装不完整，缺少或无法读取: {', '.join(missing)}。"
+                "请完成更新或用官方安装包修复安装后重试。"
+                f"安装目录: {os.path.dirname(executable)}"
+            )
+        return True, ""
+
     def launch_antigravity(self, force_restart: bool = False) -> Tuple[bool, str]:
         if not self.allow_process_control:
             return False, "当前运行环境禁止真实进程控制"
@@ -285,6 +303,11 @@ class LauncherEngine:
 
         exe_path = anti_info["exe_path"]
 
+        ready, message = self._check_antigravity_launch_ready(exe_path)
+        if not ready:
+            self.log(message, "ERROR")
+            return False, message
+
         if anti_info["running"]:
             if force_restart:
                 self.log("正在安全终止已运行的 Antigravity 进程...", "WARN")
@@ -295,6 +318,11 @@ class LauncherEngine:
                     msg = "旧 Antigravity 进程未在安全期限内退出，已取消重启以避免产生并行会话"
                     self.log(msg, "ERROR")
                     return False, msg
+                # Quitting Electron can trigger its downloaded update.
+                ready, message = self._check_antigravity_launch_ready(exe_path)
+                if not ready:
+                    self.log(message, "ERROR")
+                    return False, message
             else:
                 msg = f"Antigravity 已经在运行中 (PID: {anti_info['pids']})。如需重启请点击【重启】。"
                 self.log(msg, "WARN")
@@ -340,7 +368,11 @@ class LauncherEngine:
             time.sleep(0.35)
 
             if proc.poll() is not None:
-                msg = f"Antigravity 启动后立即退出，退出代码: {proc.returncode}"
+                code = int(proc.returncode) & 0xFFFFFFFF
+                msg = f"Antigravity 启动后立即退出，退出代码: {proc.returncode} (0x{code:08X})"
+                missing = get_antigravity_installation_issues(exe_path)
+                if missing:
+                    msg += f"；安装资源缺失: {', '.join(missing)}，请完成更新或修复安装。"
                 self.log(msg, "ERROR")
                 return False, msg
 

@@ -636,6 +636,11 @@ class LogRotationTests(unittest.TestCase):
 
 
 class AntigravityRestartTests(unittest.TestCase):
+    def setUp(self):
+        ready = mock.patch.object(LauncherEngine, "_check_antigravity_launch_ready", return_value=(True, ""))
+        ready.start()
+        self.addCleanup(ready.stop)
+
     def _preflight(self):
         return {
             "exe_found": True, "exe_path": r"C:\Anti\Antigravity.exe",
