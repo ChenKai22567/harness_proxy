@@ -74,11 +74,11 @@ class ProxyEnvironmentTests(unittest.TestCase):
         self.assertTrue(info["running"])
         self.assertEqual(info["root_pids"], [700, 500])
 
-    def test_codex_proxy_environment_matches_known_good_standard_variables(self):
+    def test_codex_proxy_environment_enables_node_and_standard_proxy_routes(self):
         stale_proxy_environment = {
             "WS_PROXY": "http://127.0.0.1:9999",
             "WSS_PROXY": "http://127.0.0.1:9999",
-            "NODE_USE_ENV_PROXY": "1",
+            "NODE_USE_ENV_PROXY": "0",
             "ELECTRON_GET_USE_PROXY": "1",
         }
         with tempfile.TemporaryDirectory() as root, mock.patch.dict(
@@ -93,12 +93,12 @@ class ProxyEnvironmentTests(unittest.TestCase):
             for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
                 self.assertEqual(env[key], proxy_url)
             self.assertEqual(env["NO_PROXY"], env_bypass)
+            self.assertEqual(env["NODE_USE_ENV_PROXY"], "1")
             for key in (
                 "WS_PROXY",
                 "WSS_PROXY",
                 "ws_proxy",
                 "wss_proxy",
-                "NODE_USE_ENV_PROXY",
                 "ELECTRON_GET_USE_PROXY",
             ):
                 self.assertNotIn(key, env)

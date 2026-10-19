@@ -25,6 +25,7 @@ from core.process_detector import (
 from core.process_classifier import collect_component_snapshot
 from core.supervisor import SessionSupervisor
 from core.package_launcher import find_package_identity, launch_packaged
+from core.codex_proxy import prepare_codex_proxy_settings
 
 # On-disk log rotation: one active file plus this many rotated backups.
 LOG_ROTATE_BYTES = 1024 * 1024
@@ -142,11 +143,10 @@ class LauncherEngine:
     ) -> Tuple[Dict[str, str], str, str, str]:
         """Build an isolated proxy environment for a launched application.
 
-        Codex resolves secure WebSocket traffic through the standard
-        ``HTTPS_PROXY``/``HTTP_PROXY``/``ALL_PROXY`` chain.  Keep its process
-        environment aligned with the known-good legacy launcher and do not
-        inject non-standard WS(S) variables or Node/Electron proxy switches.
-        Antigravity can still opt into those compatibility extensions.
+        Chromium uses command-line proxy switches, Rust uses the standard
+        proxy environment, and modern Node requires NODE_USE_ENV_PROXY to
+        apply that environment to its default HTTP(S) agents and fetch.
+        Antigravity can also opt into the legacy runtime extensions.
         """
         proxy_url = self.config_mgr.get_proxy_url()
         env_bypass = self.config_mgr.get_proxy_bypass_for_env()
@@ -172,6 +172,7 @@ class LauncherEngine:
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
             env[key] = proxy_url
         env["NO_PROXY"] = env_bypass
+        env["NODE_USE_ENV_PROXY"] = "1"
 
         if include_runtime_extensions:
             for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "WS_PROXY", "WSS_PROXY"):
@@ -179,7 +180,6 @@ class LauncherEngine:
                 env[key.lower()] = proxy_url
             env["no_proxy"] = env_bypass
             env["ELECTRON_GET_USE_PROXY"] = "1"
-            env["NODE_USE_ENV_PROXY"] = "1"
         return env, proxy_url, env_bypass, chrom_bypass
 
     def log(self, message: str, level: str = "INFO"):
@@ -491,6 +491,19 @@ class LauncherEngine:
 
         exe_path = codex_info["exe_path"]
 
+        env, proxy_url, _env_bypass, chrom_bypass = self._build_proxy_environment()
+        if not codex_info["running"] or force_restart:
+            try:
+                changed, backup = prepare_codex_proxy_settings(exe_path, env)
+                if changed:
+                    self.log("已通过 Codex 官方命令关闭系统代理优先及回退，使用启动器指定的代理。", "INFO")
+                    if backup:
+                        self.log(f"Codex 原配置已备份至: {backup}", "INFO")
+            except OSError as error:
+                message = f"无法准备 Codex 独立代理配置: {error}"
+                self.log(message, "ERROR")
+                return False, message
+
         if codex_info["running"]:
             if force_restart:
                 self.log("正在安全终止已运行的 Codex 进程...", "WARN")
@@ -505,8 +518,6 @@ class LauncherEngine:
                 msg = f"Codex 已经在运行中 (PID: {codex_info['pids']})。如需重启请点击【重启】。"
                 self.log(msg, "WARN")
                 return False, msg
-
-        env, proxy_url, _env_bypass, chrom_bypass = self._build_proxy_environment()
 
         self.log(f"派生 Codex 进程，参数: --proxy-server={proxy_url}", "INFO")
 

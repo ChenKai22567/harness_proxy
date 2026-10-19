@@ -6,7 +6,7 @@
 
 ## 🌟 核心特性
 
-- **🛡️ 纯进程级沙箱隔离**：严格只为 Antigravity 与 Codex 的进程树挂载 Chromium `--proxy-server` 与进程级环境变量，**绝不修改 Windows 系统代理、WinHTTP 或 TUN 配置**。
+- **🛡️ 独立代理路由**：为 Antigravity 与 Codex 的进程树挂载 Chromium `--proxy-server` 与进程级环境变量，**绝不修改 Windows 系统代理、WinHTTP 或 TUN 配置**。
 - **🌐 自由配置与多用户支持**：
   - 支持任意代理内核（Clash for Windows、Clash Verge、Mihomo Party、v2rayN、Sing-box 等）。
   - 内置常见端口一键预设（7890、7897、10808、2080）。
@@ -30,7 +30,9 @@
   - 区分活动进程、可清理的孤立辅助进程和 Windows 已终止记录；残留不会再阻止重新启动。
 - **🔌 Codex 标准代理链路**：
   - 启动参数覆盖 Chromium，进程环境使用 Codex 支持的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY`。
-  - Codex 的安全 WebSocket 与 HTTPS 共用标准代理路由；预检分别显示本地监听、HTTPS 出站、浏览器/API/WebSocket 三层状态。
+  - 为新版 Node 网络栈启用 `NODE_USE_ENV_PROXY`，覆盖默认 HTTP(S) 代理和 fetch；本地登录回调与应用服务始终绕过代理。
+  - 新版 Codex 启动前通过内置官方 CLI 关闭 `respect_system_proxy` 和 `system_proxy_fallback`，避免系统代理关闭或请求较慢时转为直连、导致登录工作区检查超时。原生配置修改前备份至 `$CODEX_HOME/harness-proxy-backups/`（默认 `~/.codex/`），其余配置由官方编辑器保留。
+  - 预检分别显示本地监听、HTTPS 出站、浏览器/API/WebSocket 的参数与环境标记；这些标记不能证明登录成功，也不能保证桌面端所有云端连接均已使用代理。
 - **🖥️ 现代桌面与极简浅色美学**：
   - 基于 Windows 11 Fluent 浅色风格（CustomTkinter），使用系统感灰白表面、克制圆角与深灰主操作色。
   - 下拉框采用有描边的一体化字段与 1 px 细线箭头；自绘列表使用真正的透明圆角外缘和两段直线型对勾，提供紧凑留白与中性悬停反馈，并可靠保持至选择或外部点击。

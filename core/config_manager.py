@@ -143,7 +143,14 @@ class ConfigManager:
         return f"http://{host}:{port}"
 
     def get_proxy_bypass_for_env(self) -> str:
-        return self.config["proxy"].get("bypass", "localhost,127.0.0.1,::1")
+        # Local authentication callbacks and the desktop's own services must
+        # stay local even when a custom bypass list omits loopback addresses.
+        raw = self.config["proxy"].get("bypass", "localhost,127.0.0.1,::1") or ""
+        items = [part.strip() for part in str(raw).replace(";", ",").split(",") if part.strip()]
+        for required in ("localhost", "127.0.0.1", "::1"):
+            if required not in items:
+                items.append(required)
+        return ",".join(dict.fromkeys(items))
 
     def get_proxy_bypass_for_chromium(self) -> str:
         # Chromium expects semicolons

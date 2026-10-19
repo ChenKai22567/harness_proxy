@@ -878,7 +878,7 @@ class MainWindow(ctk.CTk):
                 main_pid = primary_pids[0] if primary_pids else "-"
                 managed = bool(codex_info.get("managed"))
                 owner_text = "受管" if managed else "外部"
-                badge_text = f"运行中 ({num_procs}进程) · 代理已生效" if codex_info["has_proxy"] else f"运行中 ({num_procs}进程) · 代理不完整"
+                badge_text = f"运行中 ({num_procs}进程) · 代理参数已设置" if codex_info["has_proxy"] else f"运行中 ({num_procs}进程) · 代理不完整"
                 self.codex_status_badge.configure(
                     text=badge_text,
                     text_color=COLOR_SUCCESS_TEXT if codex_info["has_proxy"] else COLOR_WARN_TEXT,
@@ -1222,9 +1222,10 @@ class MainWindow(ctk.CTk):
                 msg += f"• 已终止记录: {info['ignored_pids']}（已从运行状态排除）\n"
             msg += f"• 本地代理监听: {'正常' if listener['reachable'] else '失败'} ({listener['host']}:{listener['port']})\n"
             msg += f"• 代理 HTTPS 出站: {'正常' if result['outbound_ok'] else '失败'} ({result['outbound_message']})\n"
-            msg += f"• Chromium 浏览器层: {'已代理' if info.get('browser_proxy') else '未检测到'}\n"
-            msg += f"• Codex API 环境层: {'已代理' if info.get('api_proxy') else '未检测到'}\n"
-            msg += f"• Responses WebSocket 层: {'已代理' if ws_ready else '未检测到'}\n"
+            msg += f"• Chromium 浏览器参数: {'已设置' if info.get('browser_proxy') else '未检测到'}\n"
+            msg += f"• Codex API 代理环境: {'已设置' if info.get('api_proxy') else '未检测到'}\n"
+            msg += f"• Responses WebSocket 代理配置: {'已设置' if ws_ready else '未检测到'}\n"
+            msg += "  配置标记不代表登录成功，实际连接以应用结果为准。\n"
             msg += f"• 当前模式: {info.get('proxy_mode', '未知')}\n"
             if system_proxy.get("enabled"):
                 msg += f"• Windows 系统代理: 已开启 ({system_proxy.get('server', '')})\n"

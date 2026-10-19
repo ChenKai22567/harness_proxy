@@ -162,10 +162,10 @@ class CodexUpdateTests(unittest.TestCase):
             launch_env = popen.call_args.kwargs["env"]
             for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
                 self.assertEqual(launch_env[key], "http://127.0.0.1:7890")
+            self.assertEqual(launch_env["NODE_USE_ENV_PROXY"], "1")
             for key in (
                 "WS_PROXY",
                 "WSS_PROXY",
-                "NODE_USE_ENV_PROXY",
                 "ELECTRON_GET_USE_PROXY",
             ):
                 self.assertNotIn(key, launch_env)
