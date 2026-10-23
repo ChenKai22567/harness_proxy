@@ -1,6 +1,7 @@
 import os
 import shutil
 import re
+import mmap
 import winreg
 import ctypes
 from ctypes import wintypes
@@ -169,11 +170,62 @@ def find_antigravity_executable(custom_path: str = "") -> Optional[str]:
 
     return None
 
+_ELECTRON_V8_VERSION = re.compile(
+    rb"\d{1,3}\.\d{1,3}\.\d{1,5}\.\d{1,5}-electron\.\d{1,3}"
+)
+
+
+def _get_antigravity_v8_issues(executable: str) -> List[str]:
+    """Recognize mixed Electron updates without running the broken image.
+
+    A stalled update can leave every file present but pair an old V8 binary
+    with a newer startup snapshot. Only compare positively identified V8
+    versions; unfamiliar builds and ambiguous binary markers remain usable.
+    """
+    snapshots = []
+    root = os.path.dirname(os.path.abspath(executable))
+    for name in ("v8_context_snapshot.bin", "snapshot_blob.bin"):
+        try:
+            with open(os.path.join(root, name), "rb") as snapshot:
+                match = _ELECTRON_V8_VERSION.search(snapshot.read(128))
+            if match:
+                snapshots.append((name, match.group()))
+        except OSError:
+            continue
+    if not snapshots:
+        return []
+
+    versions = set()
+    try:
+        with open(executable, "rb") as image_file:
+            with mmap.mmap(image_file.fileno(), 0, access=mmap.ACCESS_READ) as image:
+                offset = 0
+                while (offset := image.find(b"-electron.", offset)) != -1:
+                    prefix = image[max(0, offset - 64):offset].rsplit(b"\0", 1)[-1]
+                    suffix = image[offset:offset + 32].split(b"\0", 1)[0]
+                    candidate = prefix + suffix
+                    if _ELECTRON_V8_VERSION.fullmatch(candidate):
+                        versions.add(candidate)
+                    offset += len(b"-electron.")
+    except (OSError, ValueError):
+        return []
+    if len(versions) != 1:
+        return []
+
+    binary_version = versions.pop()
+    return [
+        f"V8 版本不匹配（{os.path.basename(executable)}: {binary_version.decode('ascii')}；"
+        f"{name}: {version.decode('ascii')}）"
+        for name, version in snapshots if version != binary_version
+    ]
+
+
 def get_antigravity_installation_issues(executable: str) -> List[str]:
     """Check resources removed/replaced by Electron's Windows updater.
 
     An exe can survive a stalled update while ICU and the app archive are
-    missing. Launching that image fails before the app can write its own log.
+    missing, or while its V8 snapshots have already been replaced. Launching
+    that image fails before the app can write its own log.
     Support both the hub's app.asar and the IDE's unpacked resources/app.
     """
     root = os.path.dirname(os.path.abspath(executable))
@@ -193,6 +245,8 @@ def get_antigravity_installation_issues(executable: str) -> List[str]:
         or nonempty_file(os.path.join(root, "resources", "app", "package.json"))
     ):
         missing.append("resources/app.asar 或 resources/app/package.json")
+    if not missing:
+        missing.extend(_get_antigravity_v8_issues(executable))
     return missing
 
 

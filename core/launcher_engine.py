@@ -274,10 +274,10 @@ class LauncherEngine:
                 f"Antigravity 更新安装器正在运行 (PID: {updater_pids})，已暂停启动/重启。"
                 "请先在安装窗口完成更新；若提示无法关闭应用，请退出 Antigravity 后点击【重试】。"
             )
-        missing = get_antigravity_installation_issues(executable)
-        if missing:
+        issues = get_antigravity_installation_issues(executable)
+        if issues:
             return False, (
-                f"Antigravity 安装不完整，缺少或无法读取: {', '.join(missing)}。"
+                f"Antigravity 安装异常，文件缺失、无法读取或版本不一致: {', '.join(issues)}。"
                 "请完成更新或用官方安装包修复安装后重试。"
                 f"安装目录: {os.path.dirname(executable)}"
             )
@@ -370,9 +370,9 @@ class LauncherEngine:
             if proc.poll() is not None:
                 code = int(proc.returncode) & 0xFFFFFFFF
                 msg = f"Antigravity 启动后立即退出，退出代码: {proc.returncode} (0x{code:08X})"
-                missing = get_antigravity_installation_issues(exe_path)
-                if missing:
-                    msg += f"；安装资源缺失: {', '.join(missing)}，请完成更新或修复安装。"
+                issues = get_antigravity_installation_issues(exe_path)
+                if issues:
+                    msg += f"；安装检查: {', '.join(issues)}，请完成更新或修复安装。"
                 self.log(msg, "ERROR")
                 return False, msg
 

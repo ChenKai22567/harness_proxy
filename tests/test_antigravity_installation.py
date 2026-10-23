@@ -34,6 +34,74 @@ class AntigravityInstallationTests(unittest.TestCase):
         })
         return engine
 
+    def set_v8_versions(self, executable, binary_version, snapshot_version):
+        exe = Path(executable)
+        exe.write_bytes(b"MZ\0" + binary_version.encode("ascii") + b"\0")
+        exe.with_name("v8_context_snapshot.bin").write_bytes(
+            b"\0" * 16 + snapshot_version.encode("ascii") + b"\0" * 64
+        )
+
+    def test_matching_v8_binary_and_snapshot_are_supported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            self.set_v8_versions(exe, "15.2.124.28-electron.0", "15.2.124.28-electron.0")
+            self.assertEqual(get_antigravity_installation_issues(exe), [])
+
+    def test_mixed_update_reports_both_v8_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            self.set_v8_versions(exe, "15.2.124.19-electron.0", "15.2.124.28-electron.0")
+            issues = get_antigravity_installation_issues(exe)
+            self.assertEqual(len(issues), 1)
+            self.assertIn("V8 版本不匹配", issues[0])
+            self.assertIn("Antigravity.exe: 15.2.124.19-electron.0", issues[0])
+            self.assertIn("v8_context_snapshot.bin: 15.2.124.28-electron.0", issues[0])
+
+    def test_unknown_snapshot_format_does_not_block_other_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            Path(exe).with_name("v8_context_snapshot.bin").write_bytes(b"unknown format")
+            self.assertEqual(get_antigravity_installation_issues(exe), [])
+
+    def test_ambiguous_binary_markers_are_not_guessed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            self.set_v8_versions(exe, "15.2.124.19-electron.0", "15.2.124.28-electron.0")
+            with open(exe, "ab") as image:
+                image.write(b"another marker\0" + b"15.2.124.28-electron.0\0")
+            self.assertEqual(get_antigravity_installation_issues(exe), [])
+
+    def test_mixed_update_is_blocked_before_stopping_running_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            self.set_v8_versions(exe, "15.2.124.19-electron.0", "15.2.124.28-electron.0")
+            engine = self.make_engine(directory, exe, running=True)
+            with mock.patch("core.launcher_engine.get_antigravity_update_pids", return_value=[]), \
+                 mock.patch.object(engine, "stop_antigravity") as stop, \
+                 mock.patch("core.launcher_engine.subprocess.Popen") as spawn:
+                ok, message = engine.launch_antigravity(force_restart=True)
+            self.assertFalse(ok)
+            self.assertIn("V8 版本不匹配", message)
+            stop.assert_not_called()
+            spawn.assert_not_called()
+
+    def test_snapshot_replaced_during_spawn_explains_breakpoint_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            self.set_v8_versions(exe, "15.2.124.19-electron.0", "15.2.124.19-electron.0")
+            engine = self.make_engine(directory, exe)
+            process = SimpleNamespace(returncode=2147483651, poll=lambda: 2147483651)
+            def spawn(*args, **kwargs):
+                self.set_v8_versions(exe, "15.2.124.19-electron.0", "15.2.124.28-electron.0")
+                return process
+            with mock.patch("core.launcher_engine.get_antigravity_update_pids", return_value=[]), \
+                 mock.patch("core.launcher_engine.subprocess.Popen", side_effect=spawn), \
+                 mock.patch("core.launcher_engine.time.sleep"):
+                ok, message = engine.launch_antigravity()
+            self.assertFalse(ok)
+            self.assertIn("0x80000003", message)
+            self.assertIn("V8 版本不匹配", message)
+
     def test_hub_and_ide_resources_are_supported(self):
         for unpacked in (False, True):
             with self.subTest(unpacked=unpacked), tempfile.TemporaryDirectory() as directory:
