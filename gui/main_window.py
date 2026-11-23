@@ -2,8 +2,8 @@ import os
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox
 import customtkinter as ctk
+from PIL import Image
 
 from core.config_manager import (
     DEFAULT_PROXY_TIMEOUT_MS,
@@ -15,7 +15,9 @@ from core.launcher_engine import LauncherEngine
 from core.proxy_prober import probe_tcp_port
 from core.process_detector import get_process_snapshot_entries, process_map_from_entries
 from core.single_instance import start_wakeup_server
+from gui.dialog_base import ask_confirmation, show_message
 from gui.native_window import (
+    OpaqueWindow,
     apply_native_surface_guards,
     create_solid_background_brush,
     delete_background_brush,
@@ -23,7 +25,7 @@ from gui.native_window import (
 )
 from gui.theme import *  # noqa: F401,F403 - shared design tokens
 from gui.tray_manager import TrayManager
-from gui.widgets import PolishedComboBox, create_status_glyph_image
+from gui.widgets import ActionButton, ActionMenu, PolishedComboBox
 
 # Standardize theme to system light mode
 ctk.set_appearance_mode("Light")
@@ -34,13 +36,112 @@ ctk.set_default_color_theme("blue")
 ctk.DrawEngine.preferred_drawing_method = "polygon_shapes"
 
 MAX_VISIBLE_LOG_LINES = 600
+MIN_WINDOW_WIDTH = 604
+MIN_WINDOW_HEIGHT = 388
+APP_NAMES = {"antigravity": "Antigravity", "codex": "Codex (ChatGPT)"}
 
-class MainWindow(ctk.CTk):
-    # CustomTkinter's Windows title-bar helper hides the window and calls a
-    # nested ``update()``. On a canvas-heavy window this can consume seconds,
-    # swallow clicks, and expose black intermediate surfaces while restoring.
-    _deactivate_windows_window_header_manipulation = True
 
+class ApplicationCard(ctk.CTkFrame):
+    def __init__(self, master, name, *, launch, diagnose, restart, stop, components):
+        super().__init__(
+            master, corner_radius=CARD_RADIUS, fg_color=COLOR_CARD_BG,
+            border_width=1, border_color=COLOR_CARD_BORDER,
+        )
+        self.grid_columnconfigure(0, weight=1)
+        self._rendered_status = None
+        heading = ctk.CTkFrame(self, fg_color="transparent")
+        heading.grid(row=0, column=0, sticky="w", padx=16, pady=(15, 1))
+        ctk.CTkLabel(
+            heading, text=name, text_color=COLOR_TEXT_HEADING,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=19, weight="bold"),
+        ).pack(side="left")
+        self.badge = ctk.CTkLabel(
+            heading, text="读取中", width=64, height=22, corner_radius=6,
+            fg_color=COLOR_INACTIVE_BG, text_color=COLOR_INACTIVE_TEXT,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+        )
+        self.badge.pack(side="left", padx=(10, 0))
+        self.summary = ctk.CTkLabel(
+            self, text="正在读取运行状态…", anchor="w", height=22,
+            text_color=COLOR_TEXT_MUTED, font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        )
+        self.summary.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 15))
+
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(0, 16), pady=12)
+        self.launch_btn = ActionButton(actions, text="启动", kind="primary", width=76, command=launch)
+        self.launch_btn.pack(side="left")
+        self.check_btn = ActionButton(actions, text="预检", width=64, command=diagnose)
+        self.check_btn.pack(side="left", padx=8)
+        self.more_btn = ActionButton(actions, text="更多", width=68, command=lambda: self.menu.toggle())
+        self.more_btn.pack(side="left")
+        self.menu = ActionMenu(self.more_btn, (
+            ("restart", "重启", restart), ("stop", "停止", stop), ("components", "组件管理", components),
+        ))
+        self.menu.buttons["restart"].configure(state="disabled")
+        self.menu.buttons["stop"].configure(state="disabled")
+
+        self.feedback = ctk.CTkLabel(
+            self, text="", anchor="w", justify="left", wraplength=480,
+            padx=10, pady=4, corner_radius=6, fg_color=COLOR_ERROR_BG, text_color=COLOR_ERROR_TEXT,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        )
+
+    def show_status(self, info, busy):
+        running = bool(info.get("running"))
+        found = bool(info.get("exe_found"))
+        managed = bool(info.get("managed"))
+        proxied = bool(info.get("has_proxy"))
+        residual = len(info.get("residual_pids", []))
+        status = (running, found, managed, proxied, residual, busy)
+        if status == self._rendered_status:
+            return
+        self._rendered_status = status
+
+        if running:
+            badge = ("运行中", COLOR_SUCCESS_BG, COLOR_SUCCESS_TEXT)
+            session = "受管会话" if managed else "外部会话"
+            route = "代理已配置" if proxied else "代理配置待检查"
+            summary = f"{session} · {route}"
+        elif residual:
+            badge = ("已退出", COLOR_WARN_BG, COLOR_WARN_TEXT)
+            summary = f"{residual} 个残留进程 · 可在组件管理中清理"
+        elif info and not found:
+            badge = ("未找到", COLOR_ERROR_BG, COLOR_ERROR_TEXT)
+            summary = "在偏好设置中指定安装路径"
+        else:
+            badge = ("未运行", COLOR_INACTIVE_BG, COLOR_INACTIVE_TEXT)
+            summary = "已检测到安装" if found else "正在读取运行状态…"
+
+        label, surface, color = badge
+        self.badge.configure(text=label, fg_color=surface, text_color=color)
+        self.summary.configure(text=summary)
+        enabled = not (running or busy)
+        self.launch_btn.configure(
+            text="处理中…" if busy else "启动",
+            state="normal" if enabled else "disabled",
+        )
+        menu_state = "normal" if running and not busy else "disabled"
+        self.menu.buttons["restart"].configure(state=menu_state)
+        self.menu.buttons["stop"].configure(state=menu_state)
+
+    def show_error(self, message: str):
+        if not message:
+            self.feedback.grid_forget()
+            return
+        if "V8 版本不匹配" in message:
+            message = "V8 组件版本不一致，请打开预检查看修复步骤。"
+        elif message.startswith("Antigravity 安装异常"):
+            message = "Antigravity 安装文件异常，请打开预检查看详情。"
+        else:
+            message = message.splitlines()[0]
+            if len(message) > 72:
+                message = message[:71] + "…"
+        self.feedback.configure(text=message)
+        self.feedback.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 12))
+
+
+class MainWindow(OpaqueWindow, ctk.CTk):
     def __init__(self, start_services: bool = True, allow_process_control: bool = True):
         super().__init__()
 
@@ -52,7 +153,6 @@ class MainWindow(ctk.CTk):
         self._ui_queue = queue.Queue()
         self._stop_event = threading.Event()
         self._refresh_lock = threading.Lock()
-        self._action_lock = threading.Lock()
         self._actions_in_flight = set()
         self._manual_refresh_in_flight = False
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="harness-worker")
@@ -67,9 +167,9 @@ class MainWindow(ctk.CTk):
         self.icon_png = get_resource_path("assets", "icon.png")
 
         # Window configuration
-        self.title("Harness代理启动")
-        self.geometry("700x630")
-        self.minsize(660, 500)
+        self.title("Harness 代理启动")
+        self.geometry("640x394")
+        self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.configure(fg_color=COLOR_BG)
 
         if os.path.exists(self.icon_ico):
@@ -87,14 +187,13 @@ class MainWindow(ctk.CTk):
         )
         self.is_running = True
         self.is_window_visible = True
-        self.log_drawer_visible = True
+        self.log_drawer_visible = False
         self._visible_log_lines = 0
-        self._last_anti_status = None
-        self._last_codex_status = None
         self._last_proxy_status = None
         self._latest_app_info = {"antigravity": None, "codex": None}
         self._settings_dialog = None
         self._component_dialog = None
+        self._diagnostic_dialogs = {}
 
         # Build UI
         self._build_ui()
@@ -107,8 +206,8 @@ class MainWindow(ctk.CTk):
                 app_icon_path=self.icon_png,
                 on_show_window=lambda: self._dispatch_ui(self._restore_from_tray),
                 on_exit_app=lambda: self._dispatch_ui(self._force_exit_app),
-                on_launch_antigravity=lambda: self._async_action(self.engine.launch_antigravity),
-                on_launch_codex=lambda: self._async_action(self.engine.launch_codex),
+                on_launch_antigravity=lambda: self._async_action(self.engine.launch_antigravity, "antigravity"),
+                on_launch_codex=lambda: self._async_action(self.engine.launch_codex, "codex"),
                 on_launch_all=lambda: self._async_action(self.engine.launch_all),
                 on_stop_all=lambda: self._async_action(self.engine.stop_all)
             )
@@ -120,7 +219,6 @@ class MainWindow(ctk.CTk):
         def _on_window_map(event):
             if event.widget == self:
                 self._apply_native_surface_guards()
-                self.update_idletasks()
         self.bind("<Map>", _on_window_map, add="+")
 
         # Initial ready log
@@ -189,7 +287,6 @@ class MainWindow(ctk.CTk):
         self._apply_native_surface_guards()
         self.deiconify()
         self.update_idletasks()
-        self._apply_native_surface_guards()
         self._force_native_repaint()
         self.lift()
         self.focus_force()
@@ -201,524 +298,120 @@ class MainWindow(ctk.CTk):
             self.after(250, self._start_background_monitor)
 
     def _build_ui(self):
-        # ---------------- Header Frame ----------------
-        header_frame = ctk.CTkFrame(self, corner_radius=8, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER)
-        header_frame.pack(fill="x", padx=16, pady=(12, 6))
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
-        # Title row
-        title_row = ctk.CTkFrame(header_frame, fg_color="transparent")
-        title_row.pack(fill="x", padx=14, pady=(10, 4))
-
-        title_lbl = ctk.CTkLabel(
-            title_row,
-            text="Harness代理启动",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
-            text_color=COLOR_TEXT_HEADING
-        )
-        title_lbl.pack(side="left")
-
-        shield_badge = ctk.CTkLabel(
-            title_row,
-            text="进程沙箱 · 零系统污染",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-            text_color=COLOR_ACCENT,
-            fg_color=COLOR_ACCENT_SOFT,
-            corner_radius=5,
-            padx=8,
-            pady=2
-        )
-        shield_badge.pack(side="left", padx=10)
-
-        self.settings_btn = ctk.CTkButton(
-            title_row,
-            text="偏好设置",
-            width=80,
-            height=28,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            command=self._open_settings
-        )
-        self.settings_btn.pack(side="right")
-
-        self.refresh_btn = ctk.CTkButton(
-            title_row,
-            text="刷新状态",
-            width=80,
-            height=28,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._manual_refresh
-        )
-        self.refresh_btn.pack(side="right", padx=6)
-
-        # Proxy Status row (with fixed widths to prevent any jitter)
-        proxy_row = ctk.CTkFrame(header_frame, fg_color=COLOR_CARD_SOFT, corner_radius=6, border_width=1, border_color=COLOR_CARD_BORDER)
-        proxy_row.pack(fill="x", padx=14, pady=(4, 6))
-
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=WINDOW_PADDING, pady=(16, 14))
+        try:
+            with Image.open(self.icon_png) as icon:
+                self._brand_icon = ctk.CTkImage(light_image=icon.convert("RGBA"), size=(42, 42))
+            ctk.CTkLabel(header, text="", image=self._brand_icon).pack(side="left", padx=(0, 10))
+        except OSError:
+            pass
         ctk.CTkLabel(
-            proxy_row,
-            text="代理网络:",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(side="left", padx=(10, 8), pady=6)
+            header, text="Harness 代理启动", text_color=COLOR_TEXT_HEADING,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+        ).pack(side="left")
+        tools = ctk.CTkFrame(header, fg_color="transparent")
+        tools.pack(side="right")
+        self.refresh_btn = ActionButton(tools, text="刷新状态", width=80, command=self._manual_refresh)
+        self.refresh_btn.pack(side="left")
+        self.settings_btn = ActionButton(tools, text="偏好设置", width=80, command=self._open_settings)
+        self.settings_btn.pack(side="left", padx=(8, 0))
 
-        # Fixed width badge prevents layout shifting
-        self.proxy_status_badge = ctk.CTkLabel(
-            proxy_row,
-            text="检测中...",
-            width=135,
-            anchor="center",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-            text_color=COLOR_WARN_TEXT,
-            fg_color=COLOR_WARN_BG,
-            corner_radius=5,
-            pady=2
+        proxy = ctk.CTkFrame(
+            self, fg_color=COLOR_CARD_BG, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLOR_CARD_BORDER,
         )
-        self.proxy_status_badge.pack(side="left", padx=(4, 6))
-
-        # Fixed width address display
+        proxy.grid(row=1, column=0, sticky="ew", padx=WINDOW_PADDING, pady=(0, SECTION_GAP))
+        proxy.grid_columnconfigure(3, weight=1)
+        ctk.CTkLabel(
+            proxy, text="代理端口", text_color=COLOR_TEXT_PRIMARY,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+        ).grid(row=0, column=0, padx=(14, 8), pady=12)
         self.proxy_addr_badge = ctk.CTkLabel(
-            proxy_row,
-            text="127.0.0.1:7890",
-            width=105,
-            anchor="w",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            text_color=COLOR_TEXT_MUTED
+            proxy, text="—", anchor="w", text_color=COLOR_TEXT_SECTION,
+            font=ctk.CTkFont(family="Consolas", size=11),
         )
-        self.proxy_addr_badge.pack(side="left", padx=(5, 8))
-
-        # Compact preset dropdown with a bordered toggle and custom styled popup.
+        self.proxy_addr_badge.grid(row=0, column=1, sticky="w")
+        self.proxy_status_badge = ctk.CTkLabel(
+            proxy, text="检测中", width=108, height=24, corner_radius=5,
+            fg_color=COLOR_INACTIVE_BG, text_color=COLOR_INACTIVE_TEXT,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+        )
+        self.proxy_status_badge.grid(row=0, column=2, padx=(8, 0))
         ctk.CTkLabel(
-            proxy_row,
-            text="预设:",
+            proxy, text="预设", text_color=COLOR_TEXT_MUTED,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(side="left", padx=(12, 6))
-
+        ).grid(row=0, column=4, padx=(10, 6))
         self.preset_combo = PolishedComboBox(
-            proxy_row,
-            values=[p["name"] for p in self.config_mgr.config.get("presets", [])],
-            command=self._on_preset_quick_switch,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            width=208,
-            height=30,
-            corner_radius=6,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY,
-            text_color_disabled=COLOR_TEXT_SUBTLE,
-            button_color="#FFFFFF",
-            button_hover_color=COLOR_CARD_HOVER,
-            dropdown_fg_color="#FFFFFF",
-            dropdown_hover_color=COLOR_CARD_HOVER,
-            dropdown_text_color=COLOR_TEXT_PRIMARY,
-            dropdown_font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            focus_color="#A8A8A8",
-            arrow_color=COLOR_TEXT_MUTED,
-            menu_active_text_color=COLOR_TEXT_PRIMARY,
-            toggle_border_color=COLOR_BORDER_STRONG,
-            popup_border_color=COLOR_BORDER_STRONG,
-            popup_selected_color=COLOR_ACCENT_SOFT,
+            proxy, values=[item["name"] for item in self.config_mgr.config.get("presets", [])],
+            command=self._on_preset_quick_switch, width=180,
         )
-        self.preset_combo.pack(side="left", padx=(4, 8))
-        preset_name = self.config_mgr.config["proxy"].get("preset", "Clash / Mihomo (7890)")
-        if preset_name in self.preset_combo.cget("values"):
-            self.preset_combo.set(preset_name)
+        self.preset_combo.grid(row=0, column=5, padx=(0, 14), pady=12)
+        self._update_preset_display()
 
-        # ---------------- Core Cards Container ----------------
-        cards_container = ctk.CTkFrame(self, fg_color="transparent")
-        cards_container.pack(fill="x", padx=16, pady=4)
+        app_list = ctk.CTkFrame(self, fg_color="transparent")
+        app_list.grid(row=2, column=0, sticky="ew", padx=WINDOW_PADDING)
+        self.app_cards = {}
+        for app_id, name in APP_NAMES.items():
+            launch = getattr(self.engine, f"launch_{app_id}")
+            card = ApplicationCard(
+                app_list, name,
+                launch=lambda target=app_id, action=launch: self._async_action(action, target),
+                diagnose=lambda target=app_id: self._open_diagnostics(target),
+                restart=lambda target=app_id: self._request_app_control(target, "restart"),
+                stop=lambda target=app_id: self._request_app_control(target, "stop"),
+                components=lambda target=app_id: self._open_components(target),
+            )
+            card.pack(fill="x", pady=(0, SECTION_GAP))
+            self.app_cards[app_id] = card
 
-        # ====== Card 1: Antigravity ======
-        self.anti_card = ctk.CTkFrame(cards_container, corner_radius=8, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER)
-        self.anti_card.pack(fill="x", pady=5)
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.grid(row=3, column=0, sticky="sew", padx=WINDOW_PADDING, pady=(2, 16))
+        self.launch_all_btn = ActionButton(
+            actions, text="全部启动", width=92, kind="primary",
+            command=lambda: self._async_action(self.engine.launch_all),
+        )
+        self.launch_all_btn.pack(side="left")
+        self.stop_all_btn = ActionButton(
+            actions, text="全部停止", width=88, kind="danger",
+            command=lambda: self._async_action(self.engine.stop_all),
+        )
+        self.stop_all_btn.pack(side="left", padx=(8, 0))
+        self.toggle_log_btn = ActionButton(
+            actions, text="运行日志", width=100, command=self._toggle_log_drawer,
+        )
+        self.toggle_log_btn.pack(side="right")
+        self._build_log_drawer()
 
-        anti_top = ctk.CTkFrame(self.anti_card, fg_color="transparent")
-        anti_top.pack(fill="x", padx=14, pady=(10, 4))
-
+    def _build_log_drawer(self):
+        self.log_container = ctk.CTkFrame(
+            self, fg_color=COLOR_CARD_BG, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLOR_CARD_BORDER,
+        )
+        head = ctk.CTkFrame(self.log_container, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(8, 6))
         ctk.CTkLabel(
-            anti_top,
-            text="Antigravity",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
-            text_color=COLOR_TEXT_HEADING
+            head, text="运行日志", text_color=COLOR_TEXT_SECTION,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
         ).pack(side="left")
-
-        self.anti_status_badge = ctk.CTkLabel(
-            anti_top,
-            text="未运行",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-            text_color=COLOR_INACTIVE_TEXT,
-            fg_color=COLOR_INACTIVE_BG,
-            corner_radius=5,
-            padx=8,
-            pady=2
-        )
-        self.anti_status_badge.pack(side="left", padx=10)
-
-        self.anti_path_lbl = ctk.CTkLabel(
-            self.anti_card,
-            text="路径: 探测中...",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w"
-        )
-        self.anti_path_lbl.pack(fill="x", padx=14, pady=(0, 2))
-
-        self.anti_patch_lbl = ctk.CTkLabel(
-            self.anti_card,
-            text="浏览器扩展代理: 检测中...",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_SUCCESS_TEXT,
-            anchor="w"
-        )
-        self.anti_patch_lbl.pack(fill="x", padx=14, pady=(0, 6))
-
-        anti_btn_row = ctk.CTkFrame(self.anti_card, fg_color="transparent")
-        anti_btn_row.pack(fill="x", padx=14, pady=(2, 10))
-
-        self.anti_launch_btn = ctk.CTkButton(
-            anti_btn_row,
-            text="专用启动",
-            width=85,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            text_color="#FFFFFF",
-            command=lambda: self._async_action(self.engine.launch_antigravity)
-        )
-        self.anti_launch_btn.pack(side="left", padx=(0, 6))
-
-        self.anti_restart_btn = ctk.CTkButton(
-            anti_btn_row,
-            text="重启",
-            width=70,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=lambda: self._request_app_control("antigravity", "restart")
-        )
-        self.anti_restart_btn.pack(side="left", padx=6)
-
-        self.anti_stop_btn = ctk.CTkButton(
-            anti_btn_row,
-            text="终止进程",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color=COLOR_ERROR_BG,
-            text_color=COLOR_ERROR_TEXT,
-            hover_color=COLOR_ERROR_HOVER,
-            border_width=1,
-            border_color=COLOR_ERROR_BORDER,
-            command=lambda: self._request_app_control("antigravity", "stop")
-        )
-        self.anti_stop_btn.pack(side="left", padx=6)
-
-        self.anti_check_btn = ctk.CTkButton(
-            anti_btn_row,
-            text="预检诊断",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            hover_color=COLOR_CARD_HOVER,
-            command=self._check_antigravity_diag
-        )
-        self.anti_check_btn.pack(side="right")
-
-        self.anti_components_btn = ctk.CTkButton(
-            anti_btn_row,
-            text="组件管理",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            hover_color=COLOR_CARD_HOVER,
-            command=lambda: self._open_components("antigravity")
-        )
-        self.anti_components_btn.pack(side="right", padx=6)
-
-        # ====== Card 2: Codex (ChatGPT) ======
-        self.codex_card = ctk.CTkFrame(cards_container, corner_radius=8, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER)
-        self.codex_card.pack(fill="x", pady=5)
-
-        codex_top = ctk.CTkFrame(self.codex_card, fg_color="transparent")
-        codex_top.pack(fill="x", padx=14, pady=(10, 4))
-
-        ctk.CTkLabel(
-            codex_top,
-            text="Codex (ChatGPT)",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
-            text_color=COLOR_TEXT_HEADING
-        ).pack(side="left")
-
-        self.codex_status_badge = ctk.CTkLabel(
-            codex_top,
-            text="未运行",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-            text_color=COLOR_INACTIVE_TEXT,
-            fg_color=COLOR_INACTIVE_BG,
-            corner_radius=5,
-            padx=8,
-            pady=2
-        )
-        self.codex_status_badge.pack(side="left", padx=10)
-
-        self.codex_path_lbl = ctk.CTkLabel(
-            self.codex_card,
-            text="路径: 探测中...",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w"
-        )
-        self.codex_path_lbl.pack(fill="x", padx=14, pady=(0, 2))
-
-        self.codex_conn_row = ctk.CTkFrame(self.codex_card, fg_color="transparent")
-        self.codex_conn_row.pack(fill="x", padx=14, pady=(0, 6))
-
-        self.codex_conn_lbl = ctk.CTkLabel(
-            self.codex_conn_row,
-            text="网络模式: 独立混合端口代理",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w"
-        )
-        self.codex_conn_lbl.pack(side="left")
-
-        # Angular status glyphs drawn exactly like the dropdown menu check;
-        # Unicode "✓/×" font glyphs look different and render softly.
-        self._codex_layer_check = create_status_glyph_image("check", COLOR_SUCCESS_TEXT)
-        self._codex_layer_cross = create_status_glyph_image("cross", COLOR_WARN_TEXT)
-        self._codex_layer_chips = []
-        for layer_name in ("浏览器", "API", "WebSocket"):
-            chip = ctk.CTkFrame(self.codex_conn_row, fg_color="transparent")
-            ctk.CTkLabel(
-                chip,
-                text=layer_name,
-                font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-                text_color=COLOR_TEXT_MUTED,
-            ).pack(side="left")
-            icon_lbl = ctk.CTkLabel(chip, image=self._codex_layer_check, text="")
-            icon_lbl.pack(side="left", padx=(2, 0))
-            self._codex_layer_chips.append((chip, icon_lbl))
-            chip.pack_forget()
-
-        codex_btn_row = ctk.CTkFrame(self.codex_card, fg_color="transparent")
-        codex_btn_row.pack(fill="x", padx=14, pady=(2, 10))
-
-        self.codex_launch_btn = ctk.CTkButton(
-            codex_btn_row,
-            text="专用启动",
-            width=85,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            fg_color=COLOR_SUCCESS,
-            hover_color=COLOR_SUCCESS_HOVER,
-            text_color="#FFFFFF",
-            command=lambda: self._async_action(self.engine.launch_codex)
-        )
-        self.codex_launch_btn.pack(side="left", padx=(0, 6))
-
-        self.codex_restart_btn = ctk.CTkButton(
-            codex_btn_row,
-            text="重启",
-            width=70,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=lambda: self._request_app_control("codex", "restart")
-        )
-        self.codex_restart_btn.pack(side="left", padx=6)
-
-        self.codex_stop_btn = ctk.CTkButton(
-            codex_btn_row,
-            text="终止进程",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color=COLOR_ERROR_BG,
-            text_color=COLOR_ERROR_TEXT,
-            hover_color=COLOR_ERROR_HOVER,
-            border_width=1,
-            border_color=COLOR_ERROR_BORDER,
-            command=lambda: self._request_app_control("codex", "stop")
-        )
-        self.codex_stop_btn.pack(side="left", padx=6)
-
-        self.codex_check_btn = ctk.CTkButton(
-            codex_btn_row,
-            text="预检诊断",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            hover_color=COLOR_CARD_HOVER,
-            command=self._check_codex_diag
-        )
-        self.codex_check_btn.pack(side="right")
-
-        self.codex_components_btn = ctk.CTkButton(
-            codex_btn_row,
-            text="组件管理",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            hover_color=COLOR_CARD_HOVER,
-            command=lambda: self._open_components("codex")
-        )
-        self.codex_components_btn.pack(side="right", padx=6)
-
-        # ---------------- Global Batch Action Row ----------------
-        # Centered action buttons with right-aligned log toggle
-        batch_row = ctk.CTkFrame(self, fg_color="transparent")
-        batch_row.pack(fill="x", padx=16, pady=(6, 8))
-
-        batch_row.grid_columnconfigure(0, weight=1, uniform="half")
-        batch_row.grid_columnconfigure(1, weight=0) # Mathematically dead-center
-        batch_row.grid_columnconfigure(2, weight=1, uniform="half")
-
-        center_cluster = ctk.CTkFrame(batch_row, fg_color="transparent")
-        center_cluster.grid(row=0, column=1)
-
-        self.launch_all_btn = ctk.CTkButton(
-            center_cluster,
-            text="一键全部启动",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            text_color="#FFFFFF",
-            corner_radius=6,
-            height=32,
-            width=120,
-            command=lambda: self._async_action(self.engine.launch_all)
-        )
-        self.launch_all_btn.pack(side="left", padx=6)
-
-        self.stop_all_btn = ctk.CTkButton(
-            center_cluster,
-            text="全部停止",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            fg_color=COLOR_ERROR_BG,
-            hover_color=COLOR_ERROR_HOVER,
-            text_color=COLOR_ERROR_TEXT,
-            border_width=1,
-            border_color=COLOR_ERROR_BORDER,
-            corner_radius=6,
-            height=32,
-            width=85,
-            command=lambda: self._async_action(self.engine.stop_all)
-        )
-        self.stop_all_btn.pack(side="left", padx=6)
-
-        self.toggle_log_btn = ctk.CTkButton(
-            batch_row,
-            text="运行日志 ▼",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            width=90,
-            height=32,
-            corner_radius=6,
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._toggle_log_drawer
-        )
-        self.toggle_log_btn.grid(row=0, column=2, sticky="e")
-
-        # ---------------- Collapsible Log Console ----------------
-        # wrap="word" for natural auto-wrapping without horizontal scrollbar
-        self.log_container = ctk.CTkFrame(self, corner_radius=8, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER)
-        self.log_container.pack(fill="both", expand=True, padx=16, pady=(2, 12))
-
-        log_head = ctk.CTkFrame(self.log_container, fg_color="transparent")
-        log_head.pack(fill="x", padx=12, pady=(6, 4))
-        ctk.CTkLabel(
-            log_head,
-            text="运行日志",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(side="left")
-
-        ctk.CTkButton(
-            log_head,
-            text="清空",
-            width=45,
-            height=22,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color=COLOR_LOG_CONTROL,
-            text_color=COLOR_TEXT_MUTED,
-            hover_color=COLOR_LOG_CONTROL_HOVER,
-            border_width=1,
-            border_color=COLOR_LOG_BORDER,
-            corner_radius=5,
-            command=self._clear_logs
-        ).pack(side="right")
-
-        # wrap="word" eliminates horizontal scrollbar!
+        ActionButton(head, text="清空", width=52, height=26, command=self._clear_logs).pack(side="right")
         self.log_textbox = ctk.CTkTextbox(
-            self.log_container,
-            font=ctk.CTkFont(family="Consolas", size=10),
-            fg_color=COLOR_LOG_BG,
-            text_color=COLOR_LOG_TEXT,
-            border_width=1,
-            border_color=COLOR_LOG_BORDER,
-            corner_radius=6,
-            wrap="word",
-            activate_scrollbars=True,
+            self.log_container, height=100, wrap="word", fg_color=COLOR_LOG_BG,
+            text_color=COLOR_LOG_TEXT, border_width=1, border_color=COLOR_LOG_BORDER,
+            corner_radius=BUTTON_RADIUS, font=ctk.CTkFont(family="Consolas", size=11),
             scrollbar_button_color=COLOR_SCROLLBAR,
-            scrollbar_button_hover_color=COLOR_SCROLLBAR_HOVER
+            scrollbar_button_hover_color=COLOR_SCROLLBAR_HOVER,
         )
-        self.log_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.log_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self.log_textbox.configure(state="disabled")
 
+    def _update_preset_display(self):
+        preset = self.config_mgr.config["proxy"].get("preset", "")
+        self.preset_combo.set(preset if preset in self.preset_combo.cget("values") else "自定义")
 
-    # ==========================================
-    # Background Polling Loop (Traffic & Power Friendly)
-    # ==========================================
     def _collect_status(self, refresh_paths: bool = False):
         """Collect one coherent status snapshot outside the Tk main thread."""
         with self._refresh_lock:
@@ -766,179 +459,30 @@ class MainWindow(ctk.CTk):
     def _apply_status_updates(self, host, port, proxy_ok, latency, msg, anti_info, codex_info):
         self._latest_app_info["antigravity"] = dict(anti_info)
         self._latest_app_info["codex"] = dict(codex_info)
-        # 1. Update Proxy Status Badge (fixed width, zero layout shift)
         proxy_signature = (host, port, proxy_ok, latency if proxy_ok else msg)
         if proxy_signature != self._last_proxy_status:
             self._last_proxy_status = proxy_signature
-            self.proxy_addr_badge.configure(text=f"{host}:{port}")
+            address = f"{host}:{port}"
+            self.proxy_addr_badge.configure(text=address if len(address) <= 21 else address[:20] + "…")
             if proxy_ok:
                 self.proxy_status_badge.configure(
-                    text=f"监听中 ({latency} ms)",
-                    text_color=COLOR_SUCCESS_TEXT,
-                    fg_color=COLOR_SUCCESS_BG
+                    text=f"监听中 · {latency:.1f} ms", text_color=COLOR_SUCCESS_TEXT,
+                    fg_color=COLOR_SUCCESS_BG,
                 )
             else:
                 self.proxy_status_badge.configure(
-                    text=f"未连接 ({msg})",
-                    text_color=COLOR_ERROR_TEXT,
-                    fg_color=COLOR_ERROR_BG
+                    text="未连接", text_color=COLOR_ERROR_TEXT, fg_color=COLOR_ERROR_BG,
                 )
+        self._refresh_app_cards()
 
-        # 2. Only redraw application cards when their semantic state changes.
-        # Repainting every CustomTkinter canvas on a four-second timer caused
-        # unnecessary CPU/GDI work and made restore animations less stable.
-        anti_signature = (
-            anti_info["exe_found"], anti_info["exe_path"], anti_info["running"],
-            tuple(anti_info["pids"]), anti_info["has_proxy"],
-            anti_info["node_found"], anti_info["npx_found"], anti_info["node_path"],
-            anti_info.get("managed", False), tuple(anti_info.get("owned_pids", [])),
-            tuple(anti_info.get("residual_pids", [])),
-        )
-        if anti_signature != self._last_anti_status:
-            self._last_anti_status = anti_signature
-            if anti_info["exe_found"]:
-                self.anti_path_lbl.configure(
-                    text=f"可执行文件: {anti_info['exe_path']}",
-                    text_color=COLOR_TEXT_MUTED,
-                )
-            else:
-                self.anti_path_lbl.configure(
-                    text="未找到 Antigravity，请在设置中手动指定路径",
-                    text_color=COLOR_ERROR_TEXT,
-                )
+    def _refresh_app_cards(self):
+        for app_id, card in self.app_cards.items():
+            card.show_status(self._latest_app_info[app_id] or {}, app_id in self._actions_in_flight)
+        state = "disabled" if self._actions_in_flight else "normal"
+        if self.launch_all_btn.cget("state") != state:
+            self.launch_all_btn.configure(state=state)
+            self.stop_all_btn.configure(state=state)
 
-            if anti_info["running"]:
-                num_procs = len(anti_info["pids"])
-                primary_pids = anti_info.get("root_pids") or anti_info["pids"]
-                main_pid = primary_pids[0] if primary_pids else "-"
-                managed = bool(anti_info.get("managed"))
-                owner_text = "受管" if managed else "外部"
-                proxy_text = "代理已生效" if anti_info["has_proxy"] else "直连无代理"
-                badge_text = f"运行中 ({num_procs}进程) · {proxy_text}"
-                self.anti_status_badge.configure(
-                    text=badge_text,
-                    text_color=COLOR_SUCCESS_TEXT if anti_info["has_proxy"] else COLOR_WARN_TEXT,
-                    fg_color=COLOR_SUCCESS_BG if anti_info["has_proxy"] else COLOR_WARN_BG,
-                )
-                self.anti_patch_lbl.configure(
-                    text=f"{owner_text}会话: 主 PID {main_pid} (共 {num_procs} 个进程)"
-                         + (" · 可安全停止" if managed else " · 重启/终止时确认接管"),
-                    text_color=COLOR_SUCCESS_TEXT if managed else COLOR_WARN_TEXT,
-                )
-                self.anti_launch_btn.configure(text="正在运行", state="disabled", fg_color=COLOR_INACTIVE_BG, text_color=COLOR_INACTIVE_TEXT)
-                self.anti_restart_btn.configure(state="normal")
-                self.anti_stop_btn.configure(state="normal")
-            else:
-                residual_pids = anti_info.get("residual_pids", [])
-                if residual_pids:
-                    self.anti_status_badge.configure(
-                        text=f"已退出 · {len(residual_pids)}个残留",
-                        text_color=COLOR_WARN_TEXT,
-                        fg_color=COLOR_WARN_BG,
-                    )
-                    self.anti_patch_lbl.configure(
-                        text="主进程已退出；可启动新会话，或在组件管理中清理残留",
-                        text_color=COLOR_WARN_TEXT,
-                    )
-                elif anti_info["node_found"] and anti_info["npx_found"]:
-                    self.anti_status_badge.configure(text="未运行", text_color=COLOR_INACTIVE_TEXT, fg_color=COLOR_INACTIVE_BG)
-                    self.anti_patch_lbl.configure(text=f"浏览器扩展代理: 已就绪 ({anti_info['node_path']})", text_color=COLOR_SUCCESS_TEXT)
-                else:
-                    self.anti_status_badge.configure(text="未运行", text_color=COLOR_INACTIVE_TEXT, fg_color=COLOR_INACTIVE_BG)
-                    self.anti_patch_lbl.configure(text="浏览器扩展代理: Node/npx 未检测到，已优雅降级", text_color=COLOR_WARN_TEXT)
-                self.anti_launch_btn.configure(text="专用启动", state="normal", fg_color=COLOR_ACCENT, text_color="#FFFFFF")
-                self.anti_restart_btn.configure(state="disabled")
-                self.anti_stop_btn.configure(state="disabled")
-
-        codex_signature = (
-            codex_info["exe_found"], codex_info["exe_path"], codex_info["running"],
-            tuple(codex_info["pids"]), codex_info["has_proxy"],
-            codex_info.get("browser_proxy", False), codex_info.get("api_proxy", False),
-            codex_info.get("websocket_proxy", False), codex_info.get("proxy_mode", ""),
-            codex_info.get("system_proxy", {}).get("matches", False),
-            codex_info.get("managed", False), tuple(codex_info.get("owned_pids", [])),
-            tuple(codex_info.get("residual_pids", [])),
-        )
-        if codex_signature != self._last_codex_status:
-            self._last_codex_status = codex_signature
-            if codex_info["exe_found"]:
-                self.codex_path_lbl.configure(
-                    text=f"可执行文件: {codex_info['exe_path']}",
-                    text_color=COLOR_TEXT_MUTED,
-                )
-            else:
-                self.codex_path_lbl.configure(
-                    text="未找到 Codex (ChatGPT.exe)，请在设置中手动选择路径",
-                    text_color=COLOR_ERROR_TEXT,
-                )
-
-            if codex_info["running"]:
-                num_procs = len(codex_info["pids"])
-                primary_pids = codex_info.get("root_pids") or codex_info["pids"]
-                main_pid = primary_pids[0] if primary_pids else "-"
-                managed = bool(codex_info.get("managed"))
-                owner_text = "受管" if managed else "外部"
-                badge_text = f"运行中 ({num_procs}进程) · 代理参数已设置" if codex_info["has_proxy"] else f"运行中 ({num_procs}进程) · 代理不完整"
-                self.codex_status_badge.configure(
-                    text=badge_text,
-                    text_color=COLOR_SUCCESS_TEXT if codex_info["has_proxy"] else COLOR_WARN_TEXT,
-                    fg_color=COLOR_SUCCESS_BG if codex_info["has_proxy"] else COLOR_WARN_BG,
-                )
-                ws_ready = bool(codex_info.get("websocket_proxy")) or codex_info.get("system_proxy", {}).get("matches", False)
-                self._set_codex_layer_chips((
-                    ("浏览器", bool(codex_info.get("browser_proxy"))),
-                    ("API", bool(codex_info.get("api_proxy"))),
-                    ("WebSocket", ws_ready),
-                ))
-                self.codex_conn_lbl.configure(
-                    text=f"{owner_text}会话: 主 PID {main_pid}"
-                         + ("" if managed else " · 重启/终止时确认接管"),
-                    text_color=COLOR_SUCCESS_TEXT if codex_info["has_proxy"] else COLOR_WARN_TEXT,
-                )
-                self.codex_launch_btn.configure(text="正在运行", state="disabled", fg_color=COLOR_INACTIVE_BG, text_color=COLOR_INACTIVE_TEXT)
-                self.codex_restart_btn.configure(state="normal")
-                self.codex_stop_btn.configure(state="normal")
-            else:
-                residual_pids = codex_info.get("residual_pids", [])
-                self._set_codex_layer_chips(None)
-                if residual_pids:
-                    self.codex_status_badge.configure(
-                        text=f"已退出 · {len(residual_pids)}个残留",
-                        text_color=COLOR_WARN_TEXT,
-                        fg_color=COLOR_WARN_BG,
-                    )
-                    self.codex_conn_lbl.configure(
-                        text="主进程已退出；残留不会阻止启动，可在组件管理中安全清理",
-                        text_color=COLOR_WARN_TEXT,
-                    )
-                else:
-                    self.codex_status_badge.configure(text="未运行", text_color=COLOR_INACTIVE_TEXT, fg_color=COLOR_INACTIVE_BG)
-                    self.codex_conn_lbl.configure(text="网络模式: 独立混合端口代理", text_color=COLOR_TEXT_MUTED)
-                self.codex_launch_btn.configure(text="专用启动", state="normal", fg_color=COLOR_SUCCESS, text_color="#FFFFFF")
-                self.codex_restart_btn.configure(state="disabled")
-                self.codex_stop_btn.configure(state="disabled")
-
-    def _set_codex_layer_chips(self, layer_states):
-        """Show the three angular layer glyphs next to the session line.
-
-        ``None`` hides them (application not running); otherwise an iterable
-        of ``(layer_name, proxy_active)`` triples is expected.
-        """
-        if len(self._codex_layer_chips) != 3:
-            return
-        for index, (chip_frame, icon_label) in enumerate(self._codex_layer_chips):
-            if layer_states is None:
-                chip_frame.pack_forget()
-                continue
-            _name, active = layer_states[index]
-            icon_label.configure(
-                image=self._codex_layer_check if active else self._codex_layer_cross
-            )
-            chip_frame.pack(side="left", padx=(8, 0))
-
-    # ==========================================
-    # Actions & Handlers
-    # ==========================================
     def _request_app_control(self, app_id: str, action: str):
         """Keep controls usable while preserving verified process ownership.
 
@@ -957,15 +501,14 @@ class MainWindow(ctk.CTk):
             return
 
         if info.get("managed"):
-            self._async_action(restart if action == "restart" else stop)
+            self._async_action(restart if action == "restart" else stop, app_id)
             return
 
         root_pids = info.get("root_pids") or []
         if not root_pids:
-            messagebox.showwarning(
-                f"无法确认 {app_label} 根进程",
+            show_message(
+                self, f"无法确认 {app_label} 根进程",
                 f"检测到 {app_label} 正在运行，但无法验证应用根进程。请刷新状态后重试，或在组件管理中查看进程详情。",
-                parent=self,
             )
             return
 
@@ -975,12 +518,11 @@ class MainWindow(ctk.CTk):
             consequence = "当前对话会关闭并重新打开。" if action == "restart" else "当前对话会关闭。"
         else:
             consequence = "当前 Antigravity 会关闭并重新打开。" if action == "restart" else "当前 Antigravity 会关闭。"
-        if not messagebox.askyesno(
-            f"接管并{verb} {app_label}",
+        if not ask_confirmation(
+            self, f"接管并{verb} {app_label}",
             f"当前 {app_label} 会话由其他启动方式创建，尚未纳入管理。\n\n"
             f"继续将先验证并接管根进程 PID {root_pid}，随后{verb}该进程及其实际子进程。"
             f"{consequence}\n\n是否继续？",
-            parent=self,
         ):
             return
 
@@ -993,31 +535,44 @@ class MainWindow(ctk.CTk):
             return self.engine.adopt_and_stop(app_id, root_pid)
 
         _adopt_then_control.__name__ = f"adopt_then_{action}_{app_id}"
-        self._async_action(_adopt_then_control)
+        self._async_action(_adopt_then_control, app_id)
 
-    def _async_action(self, func):
-        action_key = getattr(func, "__name__", repr(func))
-        with self._action_lock:
-            if action_key in self._actions_in_flight:
-                self.engine.log(f"操作 {action_key} 已在执行，请稍候。", "WARN")
-                return
-            self._actions_in_flight.add(action_key)
+    def _async_action(self, func, app_id=None):
+        targets = {app_id} if app_id else set(self.app_cards)
+        if self._actions_in_flight.intersection(targets):
+            return
+        self._actions_in_flight.update(targets)
+        for target in targets:
+            self.app_cards[target].show_error("")
+        self._fit_card_errors()
+        self._refresh_app_cards()
+
+        def _finish(results):
+            self._actions_in_flight.difference_update(targets)
+            for target, (ok, message) in results.items():
+                self.app_cards[target].show_error("" if ok else message)
+            self._fit_card_errors()
+            self._refresh_app_cards()
+            self._request_lightweight_refresh()
 
         def _run():
             try:
-                func()
-            except Exception as e:
-                self.engine.log(f"操作异常: {e}", "ERROR")
-            finally:
-                with self._action_lock:
-                    self._actions_in_flight.discard(action_key)
-                self._dispatch_ui(self._request_lightweight_refresh)
+                result = func()
+                results = {app_id: result} if app_id else result
+            except Exception as error:
+                message = f"操作失败，{error}"
+                self.engine.log(message, "ERROR")
+                results = {target: (False, message) for target in targets}
+            self._dispatch_ui(lambda: _finish(results))
 
         try:
             self._executor.submit(_run)
         except RuntimeError:
-            with self._action_lock:
-                self._actions_in_flight.discard(action_key)
+            _finish({target: (False, "操作无法启动，请重试。") for target in targets})
+
+    def _fit_card_errors(self):
+        error_rows = sum(bool(card.feedback.winfo_manager()) for card in self.app_cards.values())
+        self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT + error_rows * 36)
 
     def _manual_refresh(self):
         if self._manual_refresh_in_flight:
@@ -1107,7 +662,7 @@ class MainWindow(ctk.CTk):
         except Exception as exc:
             self._settings_dialog = None
             self.engine.log(f"打开偏好设置失败: {exc}", "ERROR")
-            messagebox.showerror("偏好设置", f"无法打开偏好设置：\n{exc}", parent=self)
+            show_message(self, "偏好设置", f"无法打开偏好设置\n{exc}")
         finally:
             self.settings_btn.configure(state="normal", text="偏好设置")
 
@@ -1117,9 +672,7 @@ class MainWindow(ctk.CTk):
     def _on_settings_saved(self):
         self.engine.log("配置已更新并保存！", "INFO")
         self._manual_refresh()
-        preset_name = self.config_mgr.config["proxy"].get("preset", "Clash / Mihomo (7890)")
-        if preset_name in self.preset_combo.cget("values"):
-            self.preset_combo.set(preset_name)
+        self._update_preset_display()
 
     def _open_components(self, app_id: str):
         try:
@@ -1145,7 +698,7 @@ class MainWindow(ctk.CTk):
         except Exception as exc:
             self._component_dialog = None
             self.engine.log(f"打开组件管理失败: {exc}", "ERROR")
-            messagebox.showerror("组件管理", f"无法打开组件管理：\n{exc}", parent=self)
+            show_message(self, "组件管理", f"无法打开组件管理\n{exc}")
 
     def _on_component_closed(self):
         self._component_dialog = None
@@ -1165,95 +718,37 @@ class MainWindow(ctk.CTk):
                 self._manual_refresh()
                 break
 
-    def _check_antigravity_diag(self):
-        # Same async shape as the Codex diagnostic: a full process snapshot
-        # must never run on the UI thread, even though it is usually fast.
-        self.anti_check_btn.configure(state="disabled", text="检测中...")
+    def _open_diagnostics(self, app_id):
+        dialog = self._diagnostic_dialogs.get(app_id)
+        if dialog is not None and not dialog._closed:
+            dialog.show()
+            return
+        from gui.diagnostic_dialog import DiagnosticDialog
 
-        def _show_result(result=None, error=None):
-            self.anti_check_btn.configure(state="normal", text="预检诊断")
-            if error:
-                messagebox.showerror("Antigravity 预检诊断", f"诊断失败：\n{error}", parent=self)
-                return
-            info = result
-            msg = f"【Antigravity 诊断结果】\n\n"
-            msg += f"• 可执行文件: {'已找到' if info['exe_found'] else '未找到'}\n  路径: {info['exe_path']}\n"
-            msg += f"• 运行状态: {'运行中' if info['running'] else '未运行'}\n  PIDs: {info['pids']}\n"
-            if info.get("residual_pids"):
-                msg += f"• 存活残留: {info['residual_pids']}（可在组件管理中清理）\n"
-            if info.get("ignored_pids"):
-                msg += f"• 已终止记录: {info['ignored_pids']}（不计为运行中）\n"
-            msg += f"• 代理参数注入: {'已生效' if info['has_proxy'] else '未挂载/未运行'}\n"
-            msg += f"• Node.js 环境: {'已找到' if info['node_found'] else '未找到'}\n  路径: {info['node_path']}\n"
-            msg += f"• NPX 命令: {'已找到' if info['npx_found'] else '未找到'}\n  路径: {info['npx_path']}\n"
-            messagebox.showinfo("Antigravity 预检诊断", msg, parent=self)
-
-        def _run():
-            try:
-                result = self.engine.preflight_antigravity()
-                self._dispatch_ui(lambda: _show_result(result=result))
-            except Exception as exc:
-                self._dispatch_ui(lambda: _show_result(error=str(exc)))
-
-        try:
-            self._executor.submit(_run)
-        except RuntimeError as exc:
-            _show_result(error=str(exc))
-
-    def _check_codex_diag(self):
-        self.codex_check_btn.configure(state="disabled", text="检测中...")
-
-        def _show_result(result=None, error=None):
-            self.codex_check_btn.configure(state="normal", text="预检诊断")
-            if error:
-                messagebox.showerror("Codex 预检诊断", f"诊断失败：\n{error}", parent=self)
-                return
-            info = result["process"]
-            listener = result["listener"]
-            system_proxy = info.get("system_proxy", {})
-            ws_ready = info.get("websocket_proxy") or system_proxy.get("matches")
-            ownership = "受管会话" if info.get("managed") else ("外部/旧会话" if info.get("running") else "—")
-            msg = "【Codex (ChatGPT) 分层诊断】\n\n"
-            msg += f"• 可执行文件: {'已找到' if info['exe_found'] else '未找到'}\n  路径: {info['exe_path']}\n"
-            msg += f"• 运行状态: {'运行中' if info['running'] else '未运行'} · {ownership}\n  PIDs: {info['pids']}\n"
-            if info.get("residual_pids"):
-                msg += f"• 存活残留: {info['residual_pids']}（不会阻止重新启动）\n"
-            if info.get("ignored_pids"):
-                msg += f"• 已终止记录: {info['ignored_pids']}（已从运行状态排除）\n"
-            msg += f"• 本地代理监听: {'正常' if listener['reachable'] else '失败'} ({listener['host']}:{listener['port']})\n"
-            msg += f"• 代理 HTTPS 出站: {'正常' if result['outbound_ok'] else '失败'} ({result['outbound_message']})\n"
-            msg += f"• Chromium 浏览器参数: {'已设置' if info.get('browser_proxy') else '未检测到'}\n"
-            msg += f"• Codex API 代理环境: {'已设置' if info.get('api_proxy') else '未检测到'}\n"
-            msg += f"• Responses WebSocket 代理配置: {'已设置' if ws_ready else '未检测到'}\n"
-            msg += "  配置标记不代表登录成功，实际连接以应用结果为准。\n"
-            msg += f"• 当前模式: {info.get('proxy_mode', '未知')}\n"
-            if system_proxy.get("enabled"):
-                msg += f"• Windows 系统代理: 已开启 ({system_proxy.get('server', '')})\n"
-            if info.get("running") and not ws_ready:
-                msg += "\n建议：使用启动器重新启动受管会话，以注入标准 HTTP/HTTPS/ALL_PROXY 环境。"
-            messagebox.showinfo("Codex 预检诊断", msg, parent=self)
-
-        def _run():
-            try:
-                result = self.engine.diagnose_codex_proxy()
-                self._dispatch_ui(lambda: _show_result(result=result))
-            except Exception as exc:
-                self._dispatch_ui(lambda: _show_result(error=str(exc)))
-
-        try:
-            self._executor.submit(_run)
-        except RuntimeError as exc:
-            _show_result(error=str(exc))
+        check = self.engine.diagnose_codex_proxy if app_id == "codex" else self.engine.diagnose_antigravity
+        self._diagnostic_dialogs[app_id] = DiagnosticDialog(self, app_id, APP_NAMES[app_id], check)
 
     def _toggle_log_drawer(self):
+        width = round(self._reverse_window_scaling(self.winfo_width()))
+        height = round(self._reverse_window_scaling(self.winfo_height()))
         if self.log_drawer_visible:
-            self.log_container.pack_forget()
-            self.toggle_log_btn.configure(text="运行日志 ▲")
-            self.log_drawer_visible = False
+            self.log_container.grid_forget()
+            self.grid_rowconfigure(3, weight=1)
+            self.grid_rowconfigure(4, weight=0)
+            self.toggle_log_btn.configure(text="运行日志")
+            if self._compact_log_height and abs(height - self._expanded_log_height) <= 1:
+                self.geometry(f"{width}x{self._compact_log_height}")
         else:
-            self.log_container.pack(fill="both", expand=True, padx=16, pady=(2, 12))
-            self.toggle_log_btn.configure(text="运行日志 ▼")
-            self.log_drawer_visible = True
+            self.grid_rowconfigure(3, weight=0)
+            self.grid_rowconfigure(4, weight=1)
+            self.log_container.grid(row=4, column=0, sticky="nsew", padx=WINDOW_PADDING, pady=(0, 16))
+            self.toggle_log_btn.configure(text="收起日志")
+            screen_height = self._reverse_window_scaling(self.winfo_screenheight() - 90)
+            self._expanded_log_height = min(576, int(screen_height))
+            self._compact_log_height = height if height < self._expanded_log_height else None
+            if self._compact_log_height:
+                self.geometry(f"{width}x{self._expanded_log_height}")
+        self.log_drawer_visible = not self.log_drawer_visible
 
     def _clear_logs(self):
         try:
@@ -1352,7 +847,6 @@ class MainWindow(ctk.CTk):
             self._apply_native_surface_guards()
             self.deiconify()
             self.update_idletasks()
-            self._apply_native_surface_guards()
             self._force_native_repaint()
             self.lift()
             self.focus_force()
@@ -1381,4 +875,9 @@ class MainWindow(ctk.CTk):
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
+        for dialog in self._diagnostic_dialogs.values():
+            if not dialog._closed:
+                dialog.close()
+        for callback in self.tk.splitlist(self.tk.call("after", "info")):
+            self.tk.call("after", "cancel", callback)
         self.destroy()

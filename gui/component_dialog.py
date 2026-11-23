@@ -1,14 +1,14 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox
 from typing import Callable, Dict, Optional
 
 import customtkinter as ctk
 
-from core.config_manager import ConfigManager, get_resource_path
+from core.config_manager import ConfigManager
 from core.launcher_engine import LauncherEngine
+from gui.dialog_base import DialogSurface, ask_confirmation, replace_content
 from gui.theme import *  # noqa: F401,F403 - shared design tokens
-from gui.widgets import CrispCheckBox
+from gui.widgets import ActionButton, CrispCheckBox, PolishedComboBox
 
 # Short local aliases over the shared tokens; the values themselves live in
 # gui/theme.py only.
@@ -26,10 +26,8 @@ APP_LABELS = {
 }
 
 
-class ComponentDialog(ctk.CTkToplevel):
+class ComponentDialog(DialogSurface):
     """Modeless process-role viewer and safe component policy editor."""
-
-    _deactivate_windows_window_header_manipulation = True
 
     def __init__(
         self,
@@ -42,8 +40,6 @@ class ComponentDialog(ctk.CTkToplevel):
         worker_executor: Optional[ThreadPoolExecutor] = None,
     ):
         super().__init__(parent)
-        self.withdraw()
-        self._parent = parent
         self.engine = engine
         self.config_mgr = config_mgr
         self.app_id = app_id if app_id in APP_LABELS else "codex"
@@ -55,54 +51,23 @@ class ComponentDialog(ctk.CTkToplevel):
         self._refresh_requested = False
         self._closed = False
         self._snapshot: Dict = {}
+        self._component_view = None
+        self._view_generation = 0
 
-        self.title("组件与子进程 - Harness代理启动")
+        self.title("组件与子进程 - Harness 代理启动")
         self.geometry("724x624")
         self.minsize(680, 560)
-        self.configure(fg_color=COLOR_BG)
-        self.transient(parent)
-        icon_path = get_resource_path("assets", "icon.ico")
-        try:
-            self.iconbitmap(icon_path)
-        except Exception:
-            pass
-
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
-        self.update_idletasks()
-        self._center_over_parent()
+        self.center_over_parent(724, 624)
         self.show()
         self._refresh_async()
-
-    def _center_over_parent(self):
-        width, height = 724, 624
-        try:
-            physical_width = self._apply_window_scaling(width)
-            physical_height = self._apply_window_scaling(height)
-            parent_y = self._parent.winfo_y()
-            title_height = max(0, self._parent.winfo_rooty() - parent_y)
-            x = self._parent.winfo_x() + (self._parent.winfo_width() - physical_width) // 2
-            # Keep the secondary workspace's top slightly above the main
-            # window.  Center-relative offsets are misleading when the two
-            # windows have different heights.
-            y = parent_y - 24
-            x = max(0, min(x, self.winfo_screenwidth() - physical_width))
-            y = max(0, min(y, self.winfo_screenheight() - physical_height - title_height))
-            self.geometry(f"{width}x{height}+{x}+{y}")
-        except Exception:
-            pass
 
     def show(self, app_id: Optional[str] = None):
         if app_id in APP_LABELS and app_id != self.app_id:
             self._switch_app(app_id)
-        try:
-            self.deiconify()
-            self.state("normal")
-            self.lift()
-            self.focus_force()
-        except Exception:
-            pass
+        self.present()
 
     def _dispatch_ui(self, callback):
         if self._closed:
@@ -112,47 +77,24 @@ class ComponentDialog(ctk.CTkToplevel):
             dispatch(lambda: callback() if self.winfo_exists() else None)
 
     def _build_ui(self):
-        header = ctk.CTkFrame(
-            self, corner_radius=8, fg_color=COLOR_CARD_BG,
-            border_width=1, border_color=COLOR_BORDER,
-        )
-        header.pack(fill="x", padx=12, pady=(10, 4))
-        title_row = ctk.CTkFrame(header, fg_color="transparent")
-        title_row.pack(fill="x", padx=12, pady=(8, 3))
+        title_row = ctk.CTkFrame(self, fg_color="transparent")
+        title_row.pack(fill="x", padx=WINDOW_PADDING, pady=(16, SECTION_GAP))
         ctk.CTkLabel(
             title_row, text="组件与子进程", text_color=COLOR_HEADING,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=17, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=21, weight="bold"),
         ).pack(side="left")
-        ctk.CTkLabel(
-            title_row, text="按功能聚合 · 仅控制受管会话", text_color=COLOR_MUTED,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        ).pack(side="left", padx=10)
 
-        self.app_selector = ctk.CTkSegmentedButton(
-            header,
-            values=[APP_LABELS["antigravity"], APP_LABELS["codex"]],
-            command=self._on_app_selected,
-            height=32,
-            corner_radius=6,
-            fg_color=COLOR_CARD_SOFT,
-            # CTkSegmentedButton has one shared text colour. A pale selected
-            # surface keeps both selected and unselected labels readable.
-            selected_color="#E5E5E5",
-            selected_hover_color=COLOR_ACCENT_SOFT,
-            unselected_color="#FFFFFF",
-            unselected_hover_color=COLOR_CARD_HOVER,
-            text_color=COLOR_SECTION,
-            text_color_disabled=COLOR_SUBTLE,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+        self.app_selector = PolishedComboBox(
+            title_row, values=list(APP_LABELS.values()), command=self._on_app_selected, width=182,
         )
-        self.app_selector.pack(fill="x", padx=12, pady=(2, 8))
+        self.app_selector.pack(side="right")
         self.app_selector.set(APP_LABELS[self.app_id])
 
         summary = ctk.CTkFrame(
-            self, corner_radius=8, fg_color=COLOR_CARD_BG,
+            self, corner_radius=CARD_RADIUS, fg_color=COLOR_CARD_BG,
             border_width=1, border_color=COLOR_BORDER,
         )
-        summary.pack(fill="x", padx=12, pady=4)
+        summary.pack(fill="x", padx=WINDOW_PADDING, pady=(0, 8))
         summary_row = ctk.CTkFrame(summary, fg_color="transparent")
         summary_row.pack(fill="x", padx=12, pady=(7, 3))
         self.summary_title = ctk.CTkLabel(
@@ -167,17 +109,17 @@ class ComponentDialog(ctk.CTkToplevel):
         )
         self.summary_badge.pack(side="right")
         self.summary_detail = ctk.CTkLabel(
-            summary, text="进程详情只在本窗口打开时采样，不增加后台开销。",
+            summary, text="",
             anchor="w", justify="left", text_color=COLOR_MUTED,
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
         )
         self.summary_detail.pack(fill="x", padx=12, pady=(0, 7))
 
         policy = ctk.CTkFrame(
-            self, corner_radius=8, fg_color=COLOR_CARD_BG,
+            self, corner_radius=CARD_RADIUS, fg_color=COLOR_CARD_BG,
             border_width=1, border_color=COLOR_BORDER,
         )
-        policy.pack(fill="x", padx=12, pady=4)
+        policy.pack(fill="x", padx=WINDOW_PADDING, pady=(0, 8))
         ctk.CTkLabel(
             policy, text="启动策略", anchor="w", text_color=COLOR_SECTION,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
@@ -198,58 +140,46 @@ class ComponentDialog(ctk.CTkToplevel):
         self.secondary_switch.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         list_header = ctk.CTkFrame(self, fg_color="transparent")
-        list_header.pack(fill="x", padx=16, pady=(6, 2))
+        list_header.pack(fill="x", padx=WINDOW_PADDING, pady=(0, 6))
         ctk.CTkLabel(
             list_header, text="运行组件", text_color=COLOR_SECTION,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
         ).pack(side="left")
-        self.refresh_btn = ctk.CTkButton(
-            list_header, text="刷新", width=64, height=26, corner_radius=6,
-            fg_color="#FFFFFF", text_color=COLOR_SECTION,
-            hover_color=COLOR_CARD_HOVER, border_width=1, border_color=COLOR_BORDER,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            command=self._refresh_async,
+        self.refresh_btn = ActionButton(
+            list_header, text="刷新", width=64, height=28, command=self._refresh_async,
         )
         self.refresh_btn.pack(side="right")
 
         self.component_list = ctk.CTkScrollableFrame(
-            self, corner_radius=8, fg_color=COLOR_CARD_SOFT,
+            self, corner_radius=CARD_RADIUS, fg_color=COLOR_CARD_SOFT,
             border_width=1, border_color=COLOR_BORDER,
-            scrollbar_button_color="#C7C7C7",
-            scrollbar_button_hover_color="#A8A8A8",
+            scrollbar_button_color=COLOR_SCROLLBAR,
+            scrollbar_button_hover_color=COLOR_SCROLLBAR_HOVER,
         )
-        self.component_list.pack(fill="both", expand=True, padx=12, pady=(2, 5))
+        self.component_list.pack(fill="both", expand=True, padx=WINDOW_PADDING, pady=(0, 8))
 
         action_bar = ctk.CTkFrame(self, fg_color="transparent")
-        action_bar.pack(fill="x", padx=12, pady=(2, 10))
+        action_bar.pack(fill="x", padx=WINDOW_PADDING, pady=(0, 16))
         self.action_status = ctk.CTkLabel(
             action_bar, text="", text_color=COLOR_MUTED, anchor="w",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
         )
         self.action_status.pack(side="left", fill="x", expand=True)
-        self.adopt_btn = ctk.CTkButton(
-            action_bar, text="接管当前会话", width=105, height=30, corner_radius=6,
-            fg_color=COLOR_WARN_BG, text_color=COLOR_WARN_TEXT,
-            hover_color="#FDECCF", border_width=1, border_color="#F6D59F",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+        self.adopt_btn = ActionButton(
+            action_bar, text="接管当前会话", width=105, state="disabled",
             command=self._adopt_current,
         )
-        self.adopt_btn.pack(side="right", padx=4)
-        self.stop_btn = ctk.CTkButton(
-            action_bar, text="停止受管会话", width=105, height=30, corner_radius=6,
-            fg_color=COLOR_ERROR_BG, text_color=COLOR_ERROR_TEXT,
-            hover_color="#FCE1E4", border_width=1, border_color=COLOR_ERROR_BORDER,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+        self.stop_btn = ActionButton(
+            action_bar, text="停止受管会话", width=105, kind="danger", state="disabled",
             command=self._stop_managed,
         )
-        self.stop_btn.pack(side="right", padx=4)
-        self.save_btn = ctk.CTkButton(
-            action_bar, text="保存策略", width=84, height=30, corner_radius=6,
-            fg_color=COLOR_ACCENT, text_color="#FFFFFF", hover_color=COLOR_ACCENT_HOVER,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+        self.save_btn = ActionButton(
+            action_bar, text="保存策略", width=84, kind="primary",
             command=self._save_policies,
         )
-        self.save_btn.pack(side="right", padx=4)
+        self.save_btn.pack(side="right")
+        self.stop_btn.pack(side="right", padx=8)
+        self.adopt_btn.pack(side="right")
 
         self.gpu_var = ctk.BooleanVar(value=True)
         self._load_policies()
@@ -258,11 +188,12 @@ class ComponentDialog(ctk.CTkToplevel):
         """Return (frame, switch, label) so callers never depend on the
         widget packing order inside the frame."""
         frame = ctk.CTkFrame(parent, fg_color=COLOR_CARD_SOFT, corner_radius=6)
-        switch = ctk.CTkSwitch(
-            frame, text=title, variable=variable, progress_color=COLOR_ACCENT,
-            button_color="#FFFFFF", button_hover_color="#FFFFFF",
-            fg_color=COLOR_BORDER_STRONG, text_color=COLOR_TEXT,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+        switch = CrispCheckBox(
+            frame, text=title, variable=variable,
+            checkbox_width=16, checkbox_height=16, border_width=1,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, border_color=COLOR_BORDER_STRONG,
+            checkmark_color=COLOR_CARD_BG, text_color=COLOR_TEXT,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
         )
         switch.pack(anchor="w", padx=10, pady=(7, 1))
         label = ctk.CTkLabel(
@@ -274,12 +205,22 @@ class ComponentDialog(ctk.CTkToplevel):
 
     def _on_app_selected(self, label: str):
         app_id = next((key for key, value in APP_LABELS.items() if value == label), "codex")
-        self._switch_app(app_id)
+        if app_id != self.app_id:
+            self._switch_app(app_id)
 
     def _switch_app(self, app_id: str):
         self.app_id = app_id
+        self._view_generation += 1
+        self._snapshot = {}
+        self._replace_component_rows(())
         self.app_selector.set(APP_LABELS[app_id])
         self._load_policies()
+        self.summary_title.configure(text=f"{APP_LABELS[app_id]} · 正在读取")
+        self.summary_badge.configure(text="读取中", fg_color=COLOR_INACTIVE_BG, text_color=COLOR_MUTED)
+        self.summary_detail.configure(text="")
+        self.action_status.configure(text="")
+        self.adopt_btn.configure(state="disabled")
+        self.stop_btn.configure(state="disabled")
         self._refresh_async()
 
     def _load_policies(self):
@@ -304,7 +245,7 @@ class ComponentDialog(ctk.CTkToplevel):
         else:
             app["components"]["websocket_proxy"] = True
         if self.config_mgr.save():
-            self.action_status.configure(text="策略已保存；GPU 设置在下次启动生效。", text_color=COLOR_SUCCESS_TEXT)
+            self.action_status.configure(text="策略已保存，GPU 设置将在下次启动时生效。", text_color=COLOR_SUCCESS_TEXT)
             if self.on_saved:
                 self.on_saved()
         else:
@@ -330,15 +271,18 @@ class ComponentDialog(ctk.CTkToplevel):
         self._refresh_requested = False
         self.refresh_btn.configure(state="disabled", text="读取中")
         requested_app = self.app_id
+        generation = self._view_generation
+
+        def apply_if_current(callback):
+            self._dispatch_ui(lambda: callback() if generation == self._view_generation else None)
 
         def worker():
             try:
                 snapshot = self.engine.get_component_snapshot(requested_app)
-                self._dispatch_ui(lambda: self._apply_snapshot(snapshot) if requested_app == self.app_id else None)
+                apply_if_current(lambda: self._apply_snapshot(snapshot))
             except Exception as exc:
-                self._dispatch_ui(
-                    lambda: self._show_refresh_error(str(exc)) if requested_app == self.app_id else None
-                )
+                message = str(exc)
+                apply_if_current(lambda: self._show_refresh_error(message))
             finally:
                 self._dispatch_ui(self._finish_refresh)
 
@@ -357,6 +301,7 @@ class ComponentDialog(ctk.CTkToplevel):
         self.summary_detail.configure(text=message)
 
     def _apply_snapshot(self, snapshot: Dict):
+        self._replace_component_rows(snapshot.get("components", []))
         self._snapshot = snapshot
         app_label = APP_LABELS.get(self.app_id, self.app_id)
         count = snapshot.get("process_count", 0)
@@ -368,10 +313,10 @@ class ComponentDialog(ctk.CTkToplevel):
         self.summary_title.configure(text=f"{app_label} · {count} 个进程 · {memory:.1f} MiB")
         if not snapshot.get("running") and residual_pids:
             self.summary_badge.configure(text="已退出 · 有残留", fg_color=COLOR_WARN_BG, text_color=COLOR_WARN_TEXT)
-            detail = f"主进程已经退出，检测到 {len(residual_pids)} 个存活辅助进程；它们不会阻止重新启动，可在下方安全清理。"
+            detail = f"主进程已退出，可清理 {len(residual_pids)} 个残留进程。"
         elif not snapshot.get("running"):
             self.summary_badge.configure(text="未运行", fg_color=COLOR_CARD_SOFT, text_color=COLOR_SUBTLE)
-            detail = "当前没有检测到存活的应用进程；保存的启动策略会在下次启动时应用。"
+            detail = "启动策略将在应用下次启动时生效。"
         elif owned:
             self.summary_badge.configure(text="受管会话", fg_color=COLOR_SUCCESS_BG, text_color=COLOR_SUCCESS_TEXT)
             detail = f"启动器管理 {owned} 个进程；另有 {external} 个外部或残留进程保持只读。"
@@ -379,13 +324,8 @@ class ComponentDialog(ctk.CTkToplevel):
                 detail += f" 其中 {len(residual_pids)} 个可单独清理。"
         else:
             self.summary_badge.configure(text="外部实例", fg_color=COLOR_WARN_BG, text_color=COLOR_WARN_TEXT)
-            detail = f"检测到 {external} 个进程，但尚未建立会话归属；执行停止或重启时会先请求确认并接管根进程。"
+            detail = f"检测到 {external} 个外部进程。停止或重启前需确认接管。"
         self.summary_detail.configure(text=detail)
-
-        for child in self.component_list.winfo_children():
-            child.destroy()
-        for component in snapshot.get("components", []):
-            self._build_component_row(component)
 
         if snapshot.get("external_root_pids"):
             self.adopt_btn.configure(text="接管当前会话", state="normal")
@@ -401,13 +341,20 @@ class ComponentDialog(ctk.CTkToplevel):
         else:
             self.stop_btn.configure(text="停止受管会话", state="disabled")
 
-    def _build_component_row(self, component: Dict):
+    def _replace_component_rows(self, components):
+        view = ctk.CTkFrame(self.component_list, fg_color="transparent")
+        for component in components:
+            self._build_component_row(view, component)
+        replace_content(self._component_view, view)
+        self._component_view = view
+
+    def _build_component_row(self, parent, component: Dict):
         running = bool(component.get("running"))
         residual_count = int(component.get("residual_count", 0))
         present = bool(component.get("present", running or residual_count))
         row = ctk.CTkFrame(
-            self.component_list, corner_radius=6,
-            fg_color=COLOR_CARD_BG if present else "#FAFAFA",
+            parent, corner_radius=CARD_RADIUS,
+            fg_color=COLOR_CARD_BG if present else COLOR_CARD_SOFT,
             border_width=1, border_color=COLOR_BORDER,
         )
         row.pack(fill="x", padx=4, pady=3)
@@ -473,56 +420,55 @@ class ComponentDialog(ctk.CTkToplevel):
         ).pack(side="right", padx=4)
 
     def _adopt_current(self):
+        app_id = self.app_id
         roots = self._snapshot.get("roots", [])
         external = [item for item in roots if not item.get("owned")]
         if not external:
             residual_pids = self._snapshot.get("residual_pids", [])
             if not residual_pids:
                 return
-            label = APP_LABELS.get(self.app_id, self.app_id)
-            if not messagebox.askyesno(
-                "清理残留进程",
-                f"{label} 主进程已经退出。\n\n将只结束检测到的 {len(residual_pids)} 个孤立辅助进程，不会影响其他活动会话。是否继续？",
-                parent=self,
+            label = APP_LABELS[app_id]
+            if not ask_confirmation(
+                self, "清理残留进程",
+                f"{label} 主进程已退出。将结束检测到的 {len(residual_pids)} 个残留辅助进程。是否继续？",
             ):
                 return
-            self._run_action(lambda: self.engine.cleanup_residuals(self.app_id))
+            self._run_action(lambda: self.engine.cleanup_residuals(app_id))
             return
         target = max(external, key=lambda item: item.get("started_at", 0.0))
         pid = int(target["pid"])
-        if not messagebox.askyesno(
-            "接管当前会话",
+        if not ask_confirmation(
+            self, "接管当前会话",
             f"将 PID {pid} 标记为启动器受管根进程。\n\n之后“停止/重启”可以结束该进程及其子进程。是否继续？",
-            parent=self,
         ):
             return
-        self._run_action(lambda: self.engine.adopt_session(self.app_id, pid))
+        self._run_action(lambda: self.engine.adopt_session(app_id, pid))
 
     def _stop_managed(self):
-        label = APP_LABELS.get(self.app_id, self.app_id)
+        app_id = self.app_id
+        label = APP_LABELS[app_id]
         roots = self._snapshot.get("roots", [])
         external = [item for item in roots if not item.get("owned")]
         if not self._snapshot.get("managed_root_pids") and external:
             target = max(external, key=lambda item: item.get("started_at", 0.0))
             pid = int(target["pid"])
-            if not messagebox.askyesno(
-                f"接管并停止 {label}",
+            if not ask_confirmation(
+                self, f"接管并停止 {label}",
                 f"将先验证并接管根进程 PID {pid}，再仅结束该根进程及其实际子进程。\n\n是否继续？",
-                parent=self,
             ):
                 return
-            self._run_action(lambda: self.engine.adopt_and_stop(self.app_id, pid))
+            self._run_action(lambda: self.engine.adopt_and_stop(app_id, pid))
             return
-        if not messagebox.askyesno(
-            "停止受管会话",
-            f"将结束启动器已登记的 {label} 根进程及其子进程。\n外部会话不会被结束。是否继续？",
-            parent=self,
+        if not ask_confirmation(
+            self, "停止受管会话",
+            f"将结束启动器已登记的 {label} 根进程及其子进程。是否继续？",
         ):
             return
-        action = self.engine.stop_codex if self.app_id == "codex" else self.engine.stop_antigravity
+        action = self.engine.stop_codex if app_id == "codex" else self.engine.stop_antigravity
         self._run_action(action)
 
     def _run_action(self, action):
+        generation = self._view_generation
         self.action_status.configure(text="正在执行…", text_color=COLOR_MUTED)
         self.adopt_btn.configure(state="disabled")
         self.stop_btn.configure(state="disabled")
@@ -532,7 +478,7 @@ class ComponentDialog(ctk.CTkToplevel):
                 ok, message = action()
             except Exception as exc:
                 ok, message = False, str(exc)
-            self._dispatch_ui(lambda: self._after_action(ok, message))
+            self._dispatch_ui(lambda: self._after_action(ok, message) if generation == self._view_generation else None)
 
         self._run_in_background(worker)
 

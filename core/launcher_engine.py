@@ -11,7 +11,13 @@ from core.config_manager import (
     get_app_root_dir,
     get_resource_path,
 )
-from core.proxy_prober import probe_tcp_port, probe_https_via_proxy
+from core.proxy_prober import (
+    CODEX_PROBE_TIMEOUT_MS,
+    CONTROL_PROBE_TIMEOUT_MS,
+    CONTROL_PROBE_URL,
+    probe_https_via_proxy,
+    probe_tcp_port,
+)
 from core.process_detector import (
     find_antigravity_executable,
     find_codex_executable,
@@ -267,18 +273,43 @@ class LauncherEngine:
             "npx_path": node_info.get("npx_path", "")
         }
 
-    def _check_antigravity_launch_ready(self, executable: str) -> Tuple[bool, str]:
+    @staticmethod
+    def _inspect_antigravity_installation(executable: Optional[str]) -> Dict[str, Any]:
         updater_pids = get_antigravity_update_pids()
         if updater_pids:
-            return False, (
-                f"Antigravity 更新安装器正在运行 (PID: {updater_pids})，已暂停启动/重启。"
-                "请先在安装窗口完成更新；若提示无法关闭应用，请退出 Antigravity 后点击【重试】。"
-            )
+            return {"status": "updating", "issues": [], "updater_pids": updater_pids}
+        if not executable:
+            return {"status": "missing", "issues": [], "updater_pids": []}
+
         issues = get_antigravity_installation_issues(executable)
-        if issues:
+        return {
+            "status": "damaged" if issues else "ready",
+            "issues": issues,
+            "updater_pids": [],
+        }
+
+    def diagnose_antigravity(self) -> Dict[str, Any]:
+        self.refresh_cached_paths()
+        process = self.preflight_antigravity()
+        return {
+            "process": process,
+            "installation": self._inspect_antigravity_installation(process.get("exe_path")),
+        }
+
+    def _check_antigravity_launch_ready(self, executable: Optional[str]) -> Tuple[bool, str]:
+        installation = self._inspect_antigravity_installation(executable)
+        status = installation["status"]
+        if status == "updating":
             return False, (
-                f"Antigravity 安装异常，文件缺失、无法读取或版本不一致: {', '.join(issues)}。"
-                "请完成更新或用官方安装包修复安装后重试。"
+                f"Antigravity 更新安装器正在运行 (PID: {installation['updater_pids']})。"
+                "请完成更新后复检。"
+            )
+        if status == "missing":
+            return False, "未找到 Antigravity 可执行文件，请在偏好设置中指定安装路径。"
+        if status == "damaged":
+            return False, (
+                f"Antigravity 安装异常：{', '.join(installation['issues'])}。"
+                "请用同产品的官方安装包修复后复检。"
                 f"安装目录: {os.path.dirname(executable)}"
             )
         return True, ""
@@ -296,13 +327,7 @@ class LauncherEngine:
             return False, msg
 
         anti_info = self.preflight_antigravity()
-        if not anti_info["exe_found"]:
-            msg = "未找到 Antigravity 可执行文件，请在设置中手动指定路径。"
-            self.log(msg, "ERROR")
-            return False, msg
-
-        exe_path = anti_info["exe_path"]
-
+        exe_path = anti_info.get("exe_path")
         ready, message = self._check_antigravity_launch_ready(exe_path)
         if not ready:
             self.log(message, "ERROR")
@@ -709,21 +734,21 @@ class LauncherEngine:
         return True, message
 
     def diagnose_codex_proxy(self) -> Dict[str, Any]:
-        """Run a bounded three-layer diagnostic without sending credentials."""
+        """Check the configured route and inspect process proxy settings."""
         proxy = self.preflight_proxy()
-        outbound_ok = False
-        outbound_latency = 0.0
-        outbound_message = "本地端口不可用"
+        primary = control = None
         if proxy["reachable"]:
-            outbound_ok, outbound_latency, outbound_message = probe_https_via_proxy(
-                proxy["host"],
-                proxy["port"],
-                timeout_ms=max(2500, self.config_mgr.config["proxy"].get("timeout_ms", 2000)),
-            )
+            address = (proxy["host"], proxy["port"])
+            primary = probe_https_via_proxy(*address, timeout_ms=CODEX_PROBE_TIMEOUT_MS)
+            last = primary.stages[-1]
+            if not primary.received_http_response and last.name != "tcp" and last.status_code != 407:
+                control = probe_https_via_proxy(
+                    *address, timeout_ms=CONTROL_PROBE_TIMEOUT_MS, url=CONTROL_PROBE_URL,
+                )
+
         return {
             "listener": proxy,
-            "outbound_ok": outbound_ok,
-            "outbound_latency_ms": outbound_latency,
-            "outbound_message": outbound_message,
+            "primary": primary,
+            "control": control,
             "process": self.preflight_codex(),
         }

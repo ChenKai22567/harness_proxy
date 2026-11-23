@@ -4,26 +4,169 @@ from typing import Dict, List, Optional, Tuple
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
+from gui.theme import (
+    BUTTON_RADIUS,
+    CARD_RADIUS,
+    COLOR_ACCENT,
+    COLOR_ACCENT_HOVER,
+    COLOR_ACCENT_SOFT,
+    COLOR_BORDER_STRONG,
+    COLOR_CARD_BG,
+    COLOR_CARD_BORDER,
+    COLOR_CARD_HOVER,
+    COLOR_ERROR_BG,
+    COLOR_ERROR_BORDER,
+    COLOR_ERROR_HOVER,
+    COLOR_ERROR_TEXT,
+    COLOR_FOCUS,
+    COLOR_INACTIVE_BG,
+    COLOR_INACTIVE_TEXT,
+    COLOR_TEXT_MUTED,
+    COLOR_TEXT_PRIMARY,
+    COLOR_TEXT_SUBTLE,
+    FONT_FAMILY,
+)
 
-def draw_straight_glyph(draw, kind: str, color, size: int = 20, line_width: int = 2):
-    """Draw the launcher's angular check/cross glyph onto a PIL image.
 
-    The dropdown menu and the status chips share this exact two-segment
-    geometry, so the mark is guaranteed to look the same everywhere.
-    """
-    if kind == "check":
-        draw.line((3, 10, 7, 14), fill=color, width=line_width)
-        draw.line((7, 14, 17, 4), fill=color, width=line_width)
-    else:  # cross
-        draw.line((4, 4, 16, 16), fill=color, width=line_width)
-        draw.line((16, 4, 4, 16), fill=color, width=line_width)
+def _is_within(widget, ancestor) -> bool:
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        widget = getattr(widget, "master", None)
+    return False
 
 
-def create_status_glyph_image(kind: str, color, display_size: int = 10) -> ctk.CTkImage:
-    """Render one angular glyph as a CTkImage for use inside labels."""
-    canvas = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
-    draw_straight_glyph(ImageDraw.Draw(canvas), kind, color)
-    return ctk.CTkImage(light_image=canvas, dark_image=canvas, size=(display_size, display_size))
+def _bind_activation(control, canvas, activate):
+    def on_activate(_event):
+        activate()
+        return "break"
+
+    canvas.configure(takefocus=lambda _path: int(control.cget("state") != tk.DISABLED))
+    canvas.bind("<Return>", on_activate, add="+")
+    canvas.bind("<space>", on_activate, add="+")
+
+
+class ActionButton(ctk.CTkButton):
+    """Launcher button with shared styling and a visible keyboard focus."""
+
+    _styles = {
+        "secondary": (COLOR_CARD_BG, COLOR_CARD_HOVER, COLOR_TEXT_PRIMARY, COLOR_CARD_BORDER),
+        "primary": (COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_CARD_BG, COLOR_ACCENT),
+        "danger": (COLOR_ERROR_BG, COLOR_ERROR_HOVER, COLOR_ERROR_TEXT, COLOR_ERROR_BORDER),
+    }
+
+    def __init__(self, master, *, kind="secondary", **kwargs):
+        self._kind = kind
+        surface, hover, text, border = self._styles[kind]
+        kwargs.setdefault("fg_color", surface)
+        kwargs.setdefault("hover_color", hover)
+        kwargs.setdefault("text_color", text)
+        kwargs.setdefault("text_color_disabled", COLOR_INACTIVE_TEXT)
+        kwargs.setdefault("border_color", border)
+        kwargs.setdefault("border_width", 1)
+        kwargs.setdefault("corner_radius", BUTTON_RADIUS)
+        kwargs.setdefault("height", 34)
+        if "font" not in kwargs:
+            kwargs["font"] = ctk.CTkFont(
+                family=FONT_FAMILY, size=12, weight="bold" if kind == "primary" else "normal",
+            )
+        super().__init__(master, **kwargs)
+        _bind_activation(self, self._canvas, self.invoke)
+        focused_border = "#B3CFFF" if kind == "primary" else COLOR_FOCUS
+        self._canvas.bind("<FocusIn>", lambda _event: self.configure(border_color=focused_border), add="+")
+        self._canvas.bind("<FocusOut>", lambda _event: self.configure(border_color=kwargs["border_color"]), add="+")
+
+    def configure(self, require_redraw=False, **kwargs):
+        state = kwargs.get("state")
+        if self._kind == "primary" and state is not None:
+            kwargs.setdefault("fg_color", COLOR_INACTIVE_BG if state == tk.DISABLED else COLOR_ACCENT)
+            kwargs.setdefault("border_width", 0 if state == tk.DISABLED else 1)
+        super().configure(require_redraw=require_redraw, **kwargs)
+
+
+class ActionMenu(ctk.CTkFrame):
+    """A small menu inside the existing window, with no extra native surface."""
+
+    def __init__(self, trigger: ActionButton, entries):
+        owner = trigger.winfo_toplevel()
+        super().__init__(
+            owner, fg_color=COLOR_CARD_BG, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLOR_BORDER_STRONG,
+        )
+        self.trigger = trigger
+        self.buttons = {}
+        for index, (key, label, callback) in enumerate(entries):
+            button = ActionButton(
+                self, text=label, command=lambda action=callback: self._invoke(action),
+                width=122, height=30, anchor="w", border_spacing=8, border_color=COLOR_CARD_BG,
+            )
+            button.pack(fill="x", padx=4, pady=(3, 4 if index == len(entries) - 1 else 0))
+            button._canvas.bind("<Up>", lambda _event: self._move_focus(-1), add="+")
+            button._canvas.bind("<Down>", lambda _event: self._move_focus(1), add="+")
+            self.buttons[key] = button
+        owner.bind("<ButtonPress-1>", self._on_click, add="+")
+        owner.bind("<FocusOut>", self._on_focus_out, add="+")
+        owner.bind("<Escape>", self._on_escape, add="+")
+        owner.bind("<Unmap>", self._on_unmap, add="+")
+
+    def toggle(self):
+        if self.winfo_manager():
+            self.close(restore_focus=True)
+            return
+        self.update_idletasks()
+        owner = self.master
+        anchor = self.trigger
+        gap = round(self._apply_widget_scaling(4))
+        x = anchor.winfo_rootx() - owner.winfo_rootx() + anchor.winfo_width() - self.winfo_reqwidth()
+        y = anchor.winfo_rooty() - owner.winfo_rooty() + anchor.winfo_height() + gap
+        if y + self.winfo_reqheight() > owner.winfo_height() - gap:
+            y = anchor.winfo_rooty() - owner.winfo_rooty() - self.winfo_reqheight() - gap
+        self.place(
+            x=round(self._reverse_widget_scaling(max(gap, x))),
+            y=round(self._reverse_widget_scaling(max(gap, y))),
+        )
+        self.lift()
+        self._move_focus(1)
+
+    def close(self, *, restore_focus=False):
+        if self.winfo_manager():
+            self.place_forget()
+            if restore_focus:
+                self.trigger._canvas.focus_set()
+
+    def _invoke(self, action):
+        self.close(restore_focus=True)
+        action()
+
+    def _move_focus(self, direction):
+        enabled = [button._canvas for button in self.buttons.values() if button.cget("state") != tk.DISABLED]
+        if enabled:
+            focused = self.focus_get()
+            index = (enabled.index(focused) + direction) % len(enabled) if focused in enabled else 0
+            enabled[index].focus_set()
+        return "break"
+
+    def _on_click(self, event):
+        if not _is_within(event.widget, self) and not _is_within(event.widget, self.trigger):
+            self.close()
+
+    def _on_focus_out(self, _event):
+        if self.winfo_manager():
+            self.after_idle(self._close_if_unfocused)
+
+    def _close_if_unfocused(self):
+        focused = self.focus_get()
+        if not _is_within(focused, self) and not _is_within(focused, self.trigger):
+            self.close()
+
+    def _on_escape(self, _event):
+        if self.winfo_manager():
+            self.close(restore_focus=True)
+            return "break"
+
+    def _on_unmap(self, event):
+        if event.widget is self.master:
+            self.close()
 
 
 def render_straight_glyph_photo(box_size: int, color: str) -> ImageTk.PhotoImage:
@@ -71,6 +214,7 @@ def _install_crisp_geometry_patch():
         # border_width == 0 means "no border" and must stay 0; only fractional
         # positive widths (1.604 px at 160% DPI) snap down to a whole pixel.
         snapped_border = border_width if not border_width else max(1, int(border_width))
+        self.set_round_to_even_numbers(False, False)
         return original(
             self,
             round(width),
@@ -101,39 +245,38 @@ class PolishedComboBox(ctk.CTkComboBox):
     def __init__(
         self,
         *args,
-        focus_color: str = "#A8A8A8",
+        focus_color: str = COLOR_FOCUS,
         arrow_color: Optional[str] = None,
         menu_active_text_color: Optional[str] = None,
-        toggle_border_color: str = "#BEBEBE",
-        popup_border_color: str = "#D0D0D0",
-        popup_selected_color: str = "#EDEDED",
+        toggle_border_color: str = COLOR_BORDER_STRONG,
+        popup_border_color: str = COLOR_BORDER_STRONG,
+        popup_selected_color: str = COLOR_ACCENT_SOFT,
         **kwargs,
     ):
         self._focus_color = focus_color
-        self._arrow_color = arrow_color or "#5F5F5F"
-        self._menu_active_text_color = menu_active_text_color or "#242424"
+        self._arrow_color = arrow_color or COLOR_TEXT_MUTED
+        self._menu_active_text_color = menu_active_text_color or COLOR_TEXT_PRIMARY
         self._toggle_border_color = toggle_border_color
         self._popup_border_color = popup_border_color
         self._popup_selected_color = popup_selected_color
-        self._popup_fg_color = kwargs.get("dropdown_fg_color", "#FFFFFF")
-        self._popup_hover_color = kwargs.get("dropdown_hover_color", "#F0F0F0")
-        self._popup_text_color = kwargs.get("dropdown_text_color", "#242424")
-        self._popup_font = kwargs.get("dropdown_font") or kwargs.get("font")
-        self._toggle_hover_color = kwargs.get("button_hover_color", "#F0F0F0")
-        self._popup_transparent_key: Optional[str] = None
-
         kwargs.setdefault("state", "readonly")
         kwargs.setdefault("justify", "left")
         kwargs.setdefault("height", 30)
         kwargs.setdefault("corner_radius", 6)
         kwargs.setdefault("border_width", 1)
-        kwargs.setdefault("border_color", "#C7C7C7")
-        kwargs.setdefault("fg_color", "#FFFFFF")
-        kwargs.setdefault("button_color", "#FFFFFF")
-        kwargs.setdefault("button_hover_color", "#FFFFFF")
-        kwargs.setdefault("dropdown_fg_color", "#FFFFFF")
-        kwargs.setdefault("dropdown_hover_color", "#F0F0F0")
-        kwargs.setdefault("dropdown_text_color", "#242424")
+        kwargs.setdefault("border_color", COLOR_BORDER_STRONG)
+        kwargs.setdefault("fg_color", COLOR_CARD_BG)
+        kwargs.setdefault("text_color", COLOR_TEXT_PRIMARY)
+        kwargs.setdefault("text_color_disabled", COLOR_TEXT_SUBTLE)
+        kwargs.setdefault("button_color", COLOR_CARD_BG)
+        self._toggle_hover_color = kwargs.setdefault("button_hover_color", COLOR_CARD_HOVER)
+        self._popup_fg_color = kwargs.setdefault("dropdown_fg_color", COLOR_CARD_BG)
+        self._popup_hover_color = kwargs.setdefault("dropdown_hover_color", COLOR_CARD_HOVER)
+        self._popup_text_color = kwargs.setdefault("dropdown_text_color", COLOR_TEXT_PRIMARY)
+        if "font" not in kwargs:
+            kwargs["font"] = ctk.CTkFont(family=FONT_FAMILY, size=11)
+        self._popup_font = kwargs.setdefault("dropdown_font", kwargs["font"])
+        self._popup_transparent_key: Optional[str] = None
         super().__init__(*args, **kwargs)
 
         if self._values and not self.get():
@@ -160,13 +303,10 @@ class PolishedComboBox(ctk.CTkComboBox):
         """Build a straight two-segment check and an equal-size spacer."""
         size = 20
         selected = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        # Draw the two strokes separately: no curved font outline and no
-        # rounded joint interpolation between the short and long segments.
-        draw_straight_glyph(
-            ImageDraw.Draw(selected),
-            "check",
-            self._apply_appearance_mode(self._menu_active_text_color),
-        )
+        draw = ImageDraw.Draw(selected)
+        color = self._apply_appearance_mode(self._menu_active_text_color)
+        draw.line((3, 10, 7, 14), fill=color, width=2)
+        draw.line((7, 14, 17, 4), fill=color, width=2)
         empty = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         return (
             ctk.CTkImage(light_image=selected, dark_image=selected, size=(10, 10)),
@@ -297,25 +437,16 @@ class PolishedComboBox(ctk.CTkComboBox):
                 center_x, center_y + (size / 5),
                 center_x + (size / 2), center_y - (size / 5),
             )
-        self._canvas.coords("polished_chevron", *points)
-
-    @staticmethod
-    def _is_widget_within(widget, ancestor) -> bool:
-        current = widget
-        while current is not None:
-            if current is ancestor:
-                return True
-            current = getattr(current, "master", None)
-        return False
+        self._canvas.coords("polished_chevron", *(round(coordinate) for coordinate in points))
 
     def _on_owner_click(self, event=None):
         """Close only for a genuine click outside this combo and its popup."""
         if not self._is_popup_open():
             return None
         widget = getattr(event, "widget", None)
-        if self._is_widget_within(widget, self):
+        if _is_within(widget, self):
             return None
-        if self._is_widget_within(widget, self._popup):
+        if _is_within(widget, self._popup):
             return None
         self._close_popup(restore_focus=False)
         return None
@@ -478,7 +609,7 @@ class PolishedComboBox(ctk.CTkComboBox):
             return
         try:
             current = self.focus_get()
-            if self._is_widget_within(current, self) or self._is_widget_within(current, self._popup):
+            if _is_within(current, self) or _is_within(current, self._popup):
                 return
         except tk.TclError:
             pass
@@ -559,9 +690,9 @@ class PolishedComboBox(ctk.CTkComboBox):
             )
             self._set_toggle_visual(opened=getattr(self, "_popup", None) is not None)
 
-            separator_x = self._apply_widget_scaling(self._current_width - self._current_height)
-            top = self._apply_widget_scaling(max(3, self._border_width + 2))
-            bottom = self._apply_widget_scaling(self._current_height) - top
+            separator_x = round(self._apply_widget_scaling(self._current_width - self._current_height))
+            top = round(self._apply_widget_scaling(max(3, self._border_width + 2)))
+            bottom = round(self._apply_widget_scaling(self._current_height)) - top
             if not self._canvas.find_withtag("polished_toggle_separator"):
                 self._canvas.create_line(
                     separator_x,
@@ -602,11 +733,19 @@ class CrispCheckBox(ctk.CTkCheckBox):
     # Class attribute: CTkCheckBox.__init__ calls _draw() before subclass
     # instance attributes exist, so the hover flag must already resolve.
     _hovering = False
+    _keyboard_focused = False
 
     def __init__(self, *args, **kwargs):
         # corner_radius stays accepted for call-site compatibility but is
         # deliberately unused: the box is drawn as a true rectangle.
         super().__init__(*args, **kwargs)
+        _bind_activation(self, self._canvas, self.toggle)
+        self._canvas.bind("<FocusIn>", self._on_keyboard_focus, add="+")
+        self._canvas.bind("<FocusOut>", self._on_keyboard_focus, add="+")
+
+    def _on_keyboard_focus(self, event):
+        self._keyboard_focused = event.type == tk.EventType.FocusIn
+        self._draw()
 
     def _box_pixel_size(self):
         scaled_width = self._apply_widget_scaling(self._checkbox_width)
@@ -644,6 +783,10 @@ class CrispCheckBox(ctk.CTkCheckBox):
                     border = self._fg_color
                 self._draw_rounded_outline(
                     canvas, width, height, self._apply_appearance_mode(border), background
+                )
+            if self._keyboard_focused:
+                canvas.create_rectangle(
+                    0, 0, width - 1, height - 1, outline=COLOR_FOCUS, tags=("crisp_parts",),
                 )
             canvas.configure(bg=background)
             if self._bg_canvas is not None:

@@ -20,9 +20,21 @@ _DWMWA_TRANSITIONS_FORCEDISABLED = 3
 _SWP_FRAMECHANGED_FLAGS = 0x0027  # NOMOVE | NOSIZE | NOZORDER | FRAMECHANGED
 
 _RDW_INVALIDATE = 0x0001
-_RDW_ERASE = 0x0004
 _RDW_ALLCHILDREN = 0x0080
 _RDW_UPDATENOW = 0x0100
+
+
+class OpaqueWindow:
+    """Keep the native window opaque while CustomTkinter updates its DPI."""
+
+    _deactivate_windows_window_header_manipulation = True
+
+    def attributes(self, *args):
+        if len(args) == 2 and args[0] == "-alpha":
+            # The scaling tracker briefly sets alpha to 0.15 and then to 1.
+            # That toggles Windows compositing on an otherwise opaque surface.
+            return None
+        return super().attributes(*args)
 
 
 def create_solid_background_brush(hex_color: str):
@@ -64,6 +76,12 @@ def apply_native_surface_guards(child_hwnd: int, background_brush) -> bool:
     user32.SetClassLongPtrW(parent_hwnd, _GCLP_HBRBACKGROUND, background_brush)
     user32.SetClassLongPtrW(child_hwnd, _GCLP_HBRBACKGROUND, background_brush)
 
+    disable_native_transitions(child_hwnd)
+    return True
+
+
+def disable_native_transitions(child_hwnd: int) -> None:
+    parent_hwnd = ctypes.windll.user32.GetParent(child_hwnd) or child_hwnd
     val = wintypes.BOOL(True)
     ctypes.windll.dwmapi.DwmSetWindowAttribute(
         parent_hwnd,
@@ -71,7 +89,6 @@ def apply_native_surface_guards(child_hwnd: int, background_brush) -> bool:
         ctypes.byref(val),
         ctypes.sizeof(val),
     )
-    return True
 
 
 def force_native_repaint(child_hwnd: int) -> None:
@@ -81,6 +98,6 @@ def force_native_repaint(child_hwnd: int) -> None:
         parent_hwnd,
         None,
         None,
-        _RDW_INVALIDATE | _RDW_ERASE | _RDW_ALLCHILDREN | _RDW_UPDATENOW,
+        _RDW_INVALIDATE | _RDW_ALLCHILDREN | _RDW_UPDATENOW,
     )
     ctypes.windll.dwmapi.DwmFlush()

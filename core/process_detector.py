@@ -183,17 +183,24 @@ def _get_antigravity_v8_issues(executable: str) -> List[str]:
     versions; unfamiliar builds and ambiguous binary markers remain usable.
     """
     snapshots = []
+    issues = []
     root = os.path.dirname(os.path.abspath(executable))
     for name in ("v8_context_snapshot.bin", "snapshot_blob.bin"):
         try:
             with open(os.path.join(root, name), "rb") as snapshot:
-                match = _ELECTRON_V8_VERSION.search(snapshot.read(128))
+                header = snapshot.read(128)
+            if not header:
+                issues.append(f"{name} 为空")
+                continue
+            match = _ELECTRON_V8_VERSION.search(header)
             if match:
                 snapshots.append((name, match.group()))
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            issues.append(f"{name} 无法读取")
     if not snapshots:
-        return []
+        return issues
 
     versions = set()
     try:
@@ -208,12 +215,12 @@ def _get_antigravity_v8_issues(executable: str) -> List[str]:
                         versions.add(candidate)
                     offset += len(b"-electron.")
     except (OSError, ValueError):
-        return []
+        return issues + [f"{os.path.basename(executable)} 无法读取"]
     if len(versions) != 1:
-        return []
+        return issues
 
     binary_version = versions.pop()
-    return [
+    return issues + [
         f"V8 版本不匹配（{os.path.basename(executable)}: {binary_version.decode('ascii')}；"
         f"{name}: {version.decode('ascii')}）"
         for name, version in snapshots if version != binary_version
@@ -230,19 +237,20 @@ def get_antigravity_installation_issues(executable: str) -> List[str]:
     """
     root = os.path.dirname(os.path.abspath(executable))
 
-    def nonempty_file(path):
+    def readable_file(path):
         try:
-            return os.path.isfile(path) and os.path.getsize(path) > 0
+            with open(path, "rb") as resource:
+                return bool(resource.read(1))
         except OSError:
             return False
 
     missing = []
     for relative in (os.path.basename(executable), "icudtl.dat", "resources.pak"):
-        if not nonempty_file(os.path.join(root, relative)):
+        if not readable_file(os.path.join(root, relative)):
             missing.append(relative)
     if not (
-        nonempty_file(os.path.join(root, "resources", "app.asar"))
-        or nonempty_file(os.path.join(root, "resources", "app", "package.json"))
+        readable_file(os.path.join(root, "resources", "app.asar"))
+        or readable_file(os.path.join(root, "resources", "app", "package.json"))
     ):
         missing.append("resources/app.asar 或 resources/app/package.json")
     if not missing:

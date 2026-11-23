@@ -1,52 +1,49 @@
-"""Shared neutral desktop design tokens for every window.
-
-The palette is deliberately Windows-aligned: surfaces stay within one
-cool-grey family, and colour is reserved for compact status feedback.
-GUI modules import with ``from gui.theme import *``; ``__all__`` below is
-the authoritative list of public names, so a token can never silently
-diverge between the main window and the dialogs again.
-"""
+"""Shared colors and spacing for the Windows launcher."""
 
 FONT_FAMILY = "Microsoft YaHei UI"
+WINDOW_PADDING = 18
+SECTION_GAP = 10
+CARD_RADIUS = 6
+BUTTON_RADIUS = 5
 
 # Surfaces and borders
-COLOR_BG = "#F3F3F3"
+COLOR_BG = "#F4F6FB"
 COLOR_CARD_BG = "#FFFFFF"
-COLOR_CARD_SOFT = "#F7F7F7"
-COLOR_CARD_HOVER = "#F0F0F0"
-COLOR_CARD_BORDER = "#E1E1E1"
-COLOR_BORDER_STRONG = "#C7C7C7"
+COLOR_CARD_SOFT = "#F7F8FC"
+COLOR_CARD_HOVER = "#EDF0F8"
+COLOR_CARD_BORDER = "#DCE2EE"
+COLOR_BORDER_STRONG = "#BAC4D8"
 
 # Text
-COLOR_TEXT_HEADING = "#1F1F1F"
-COLOR_TEXT_PRIMARY = "#242424"
-COLOR_TEXT_SECTION = "#3A3A3A"
-COLOR_TEXT_MUTED = "#666666"
-COLOR_TEXT_SUBTLE = "#8A8A8A"
+COLOR_TEXT_HEADING = "#151D31"
+COLOR_TEXT_PRIMARY = "#242F46"
+COLOR_TEXT_SECTION = "#38455F"
+COLOR_TEXT_MUTED = "#526078"
+COLOR_TEXT_SUBTLE = "#5C6980"
 
-# Accent (primary actions stay neutral grey)
-COLOR_ACCENT = "#3B3B3B"
-COLOR_ACCENT_HOVER = "#2F2F2F"
-COLOR_ACCENT_SOFT = "#EEEEEE"
+# Accent
+COLOR_ACCENT = "#4338CA"
+COLOR_ACCENT_HOVER = "#3429AB"
+COLOR_ACCENT_SOFT = "#ECECFF"
+COLOR_FOCUS = "#1468CE"
 
 # Semantic status colours, used on small badges only
-COLOR_SUCCESS = "#0AA36D"          # refined emerald green
-COLOR_SUCCESS_HOVER = "#088A5C"
-COLOR_SUCCESS_BG = "#E7F7F0"
-COLOR_SUCCESS_TEXT = "#0A8055"
+COLOR_SUCCESS = "#087850"
+COLOR_SUCCESS_BG = "#E5F6EF"
+COLOR_SUCCESS_TEXT = "#076345"
 
-COLOR_WARN = "#F28A00"             # warm tech amber
-COLOR_WARN_BG = "#FFF7EB"
-COLOR_WARN_TEXT = "#B45309"
+COLOR_WARN = "#B56917"
+COLOR_WARN_BG = "#FFF3DE"
+COLOR_WARN_TEXT = "#8F4A0A"
 
-COLOR_ERROR = "#D95765"            # soft rose-red
-COLOR_ERROR_BG = "#FDF0F1"
+COLOR_ERROR = "#C14054"
+COLOR_ERROR_BG = "#FCEEF1"
 COLOR_ERROR_BORDER = "#F8CCD1"
-COLOR_ERROR_TEXT = "#C53041"
+COLOR_ERROR_TEXT = "#A52D40"
 COLOR_ERROR_HOVER = "#FCE1E4"
 
-COLOR_INACTIVE_BG = "#EEEEEE"
-COLOR_INACTIVE_TEXT = "#808080"
+COLOR_INACTIVE_BG = "#ECEFF6"
+COLOR_INACTIVE_TEXT = "#526078"
 
 # Log console
 COLOR_LOG_BG = "#F7F8FA"
@@ -59,6 +56,10 @@ COLOR_SCROLLBAR_HOVER = "#AEB8C5"
 
 __all__ = [
     "FONT_FAMILY",
+    "WINDOW_PADDING",
+    "SECTION_GAP",
+    "CARD_RADIUS",
+    "BUTTON_RADIUS",
     "COLOR_BG",
     "COLOR_CARD_BG",
     "COLOR_CARD_SOFT",
@@ -73,8 +74,8 @@ __all__ = [
     "COLOR_ACCENT",
     "COLOR_ACCENT_HOVER",
     "COLOR_ACCENT_SOFT",
+    "COLOR_FOCUS",
     "COLOR_SUCCESS",
-    "COLOR_SUCCESS_HOVER",
     "COLOR_SUCCESS_BG",
     "COLOR_SUCCESS_TEXT",
     "COLOR_WARN",

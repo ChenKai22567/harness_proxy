@@ -4,6 +4,8 @@ from typing import Callable, Optional
 from PIL import Image, ImageDraw
 import pystray
 
+from gui.theme import COLOR_ACCENT
+
 class TrayManager:
     def __init__(
         self,
@@ -50,10 +52,12 @@ class TrayManager:
         # an opaque blue block when packaging/resource discovery regresses.
         image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((3, 3, 60, 60), radius=14, fill=(23, 111, 229, 255))
-        draw.rounded_rectangle((16, 14, 25, 50), radius=4, fill=(255, 255, 255, 255))
-        draw.rounded_rectangle((39, 14, 48, 50), radius=4, fill=(255, 255, 255, 255))
-        draw.rectangle((23, 27, 41, 36), fill=(255, 255, 255, 255))
+        draw.rounded_rectangle((3, 3, 60, 60), radius=14, fill=COLOR_ACCENT)
+        draw.line((20, 18, 20, 46), width=5, fill="white")
+        draw.line((44, 18, 44, 46), width=5, fill="white")
+        draw.line([(20, 30), (29, 30), (35, 34), (44, 34)], width=5, fill="white")
+        for x, y in ((20, 18), (20, 46), (44, 18), (44, 46)):
+            draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill="white")
         return image
 
     def _build_menu(self):

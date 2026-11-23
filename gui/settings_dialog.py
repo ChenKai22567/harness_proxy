@@ -1,24 +1,16 @@
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 import customtkinter as ctk
 from typing import Callable, Optional
 
-from core.config_manager import ConfigManager, get_resource_path
+from core.config_manager import ConfigManager
 from core.proxy_prober import probe_tcp_port, scan_available_proxies
+from gui.dialog_base import DialogSurface, ask_confirmation, show_message
 from gui.theme import *  # noqa: F401,F403 - shared design tokens
-from gui.widgets import CrispCheckBox, PolishedComboBox
+from gui.widgets import ActionButton, CrispCheckBox, PolishedComboBox
 
-COLOR_INACTIVE_BG = "#EEEEEE"
-COLOR_INACTIVE_TEXT = "#808080"
-
-class SettingsDialog(ctk.CTkToplevel):
-    # Avoid CustomTkinter's nested withdraw/update title-bar workaround. When
-    # combined with our own hidden first layout it could leave this toplevel
-    # invisible while it still owned the Tk input grab.
-    _deactivate_windows_window_header_manipulation = True
-
+class SettingsDialog(DialogSurface):
     def __init__(
         self,
         parent,
@@ -28,10 +20,6 @@ class SettingsDialog(ctk.CTkToplevel):
         worker_executor: Optional[ThreadPoolExecutor] = None,
     ):
         super().__init__(parent)
-        # A CTkToplevel maps immediately unless explicitly withdrawn.  Build it
-        # off-screen first so users never see the blank/partially painted page.
-        self.withdraw()
-        self._parent = parent
         self._ui_thread_id = threading.get_ident()
         self._worker_executor = worker_executor
 
@@ -42,58 +30,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_close_callback = on_close_callback
         self._close_notified = False
 
-        self.title("偏好设置 - Harness代理启动")
-        self.geometry("580x650")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.configure(fg_color=COLOR_BG)
-
-        # Window icon
-        icon_path = get_resource_path("assets", "icon.ico")
-        if os.path.exists(icon_path):
-            try:
-                self.iconbitmap(icon_path)
-            except Exception:
-                pass
-
+        self.title("偏好设置 - Harness 代理启动")
+        self.geometry("600x632")
+        self.minsize(524, 420)
         self._build_ui()
         self._load_values()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
-        self.update_idletasks()
-        self._center_over_parent()
+        self.center_over_parent(600, 632)
         self.show()
 
-    def _center_over_parent(self):
-        width, height = 580, 650
-        try:
-            parent_x = self._parent.winfo_x()
-            parent_y = self._parent.winfo_y()
-            parent_width = self._parent.winfo_width()
-            physical_width = self._apply_window_scaling(width)
-            physical_height = self._apply_window_scaling(height)
-            title_height = max(0, self._parent.winfo_rooty() - parent_y)
-            x = parent_x + (parent_width - physical_width) // 2
-            # Align to the parent's top edge instead of offsetting a centered
-            # rectangle.  Because this dialog is shorter than the main window,
-            # "center then move up" could still leave its top visibly lower.
-            y = parent_y - 24
-            x = max(0, min(x, self.winfo_screenwidth() - physical_width))
-            y = max(0, min(y, self.winfo_screenheight() - physical_height - title_height))
-            self.geometry(f"{width}x{height}+{x}+{y}")
-        except Exception:
-            self.geometry(f"{width}x{height}")
-
     def show(self):
-        try:
-            if not self.winfo_exists():
-                return
-            self.deiconify()
-            self.state("normal")
-            self.lift()
-            self.focus_force()
-        except Exception:
-            pass
+        self.present()
 
     def _dispatch_ui(self, callback):
         """Use the parent window's thread-safe dispatcher for worker results."""
@@ -136,465 +84,132 @@ class SettingsDialog(ctk.CTkToplevel):
                     pass
 
     def _build_ui(self):
-        # ---------------- Dialog Header Frame ----------------
-        header_frame = ctk.CTkFrame(self, corner_radius=8, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER)
-        header_frame.pack(fill="x", padx=14, pady=(10, 5))
-
-        h_row = ctk.CTkFrame(header_frame, fg_color="transparent")
-        h_row.pack(fill="x", padx=14, pady=8)
-
         ctk.CTkLabel(
-            h_row,
-            text="偏好设置",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
-            text_color=COLOR_TEXT_HEADING
-        ).pack(side="left")
+            self, text="偏好设置", anchor="w", text_color=COLOR_TEXT_HEADING,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=21, weight="bold"),
+        ).pack(fill="x", padx=WINDOW_PADDING, pady=(16, SECTION_GAP))
+        content = ctk.CTkScrollableFrame(
+            self, fg_color=COLOR_BG, scrollbar_button_color=COLOR_SCROLLBAR,
+            scrollbar_button_hover_color=COLOR_SCROLLBAR_HOVER,
+        )
+        content.pack(fill="both", expand=True, padx=(WINDOW_PADDING, 12))
 
-        ctk.CTkLabel(
-            h_row,
-            text="代理网络参数 · 路径检索 · 系统行为",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_MUTED
-        ).pack(side="left", padx=10)
-
-        # ---------------- Non-Scrollable Content Container (All fits without scrollbar) ----------------
-        content_frame = ctk.CTkFrame(self, fg_color="transparent")
-        content_frame.pack(padx=14, pady=0, fill="both", expand=True)
-
-        # ====== Section 1: Proxy Network Settings ======
-        proxy_card = ctk.CTkFrame(content_frame, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER, corner_radius=8)
-        proxy_card.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(
-            proxy_card,
-            text="代理网络设置",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(anchor="w", padx=14, pady=(8, 4))
-
-        # Preset selector row
-        p_row1 = ctk.CTkFrame(proxy_card, fg_color="transparent")
-        p_row1.pack(fill="x", padx=14, pady=3)
-        ctk.CTkLabel(
-            p_row1,
-            text="快捷预设:",
-            width=65,
-            anchor="w",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_PRIMARY
-        ).pack(side="left")
-
+        proxy = self._form_section(content, "代理网络")
+        preset = self._form_row(proxy, "预设")
         self.preset_combo = PolishedComboBox(
-            p_row1,
-            values=[p["name"] for p in self.config_mgr.config.get("presets", [])],
-            command=self._on_preset_selected,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            width=230,
-            height=30,
-            corner_radius=6,
-            border_width=1,
-            fg_color="#FFFFFF",
-            border_color=COLOR_BORDER_STRONG,
-            text_color=COLOR_TEXT_PRIMARY,
-            text_color_disabled=COLOR_TEXT_SUBTLE,
-            button_color="#FFFFFF",
-            button_hover_color=COLOR_CARD_HOVER,
-            dropdown_fg_color="#FFFFFF",
-            dropdown_hover_color=COLOR_CARD_HOVER,
-            dropdown_text_color=COLOR_TEXT_PRIMARY,
-            dropdown_font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            focus_color="#A8A8A8",
-            arrow_color=COLOR_TEXT_MUTED,
-            menu_active_text_color=COLOR_TEXT_PRIMARY,
-            toggle_border_color=COLOR_BORDER_STRONG,
-            popup_border_color=COLOR_BORDER_STRONG,
-            popup_selected_color=COLOR_ACCENT_SOFT,
+            preset, values=[item["name"] for item in self.config_mgr.config.get("presets", [])],
+            command=self._on_preset_selected, width=218,
         )
-        self.preset_combo.pack(side="left", padx=4)
+        self.preset_combo.pack(side="left", fill="x", expand=True)
+        self.scan_btn = ActionButton(preset, text="自动探测端口", width=108, height=30, command=self._scan_ports)
+        self.scan_btn.pack(side="right", padx=(8, 0))
 
-        self.scan_btn = ctk.CTkButton(
-            p_row1,
-            text="自动探测端口",
-            width=95,
-            height=28,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._scan_ports
-        )
-        self.scan_btn.pack(side="left", padx=4)
-
-        # Host & Port row
-        p_row2 = ctk.CTkFrame(proxy_card, fg_color="transparent")
-        p_row2.pack(fill="x", padx=14, pady=3)
+        address = self._form_row(proxy, "主机")
+        self.host_entry = self._form_entry(address, width=130)
+        self.host_entry.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
-            p_row2,
-            text="主机 IP:",
-            width=65,
-            anchor="w",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_PRIMARY
-        ).pack(side="left")
-
-        self.host_entry = ctk.CTkEntry(
-            p_row2,
-            width=135,
-            height=28,
-            corner_radius=5,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            border_color=COLOR_CARD_BORDER,
-            text_color=COLOR_TEXT_PRIMARY
+            address, text="端口", text_color=COLOR_TEXT_MUTED,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).pack(side="left", padx=(10, 6))
+        self.port_entry = self._form_entry(address, width=66)
+        self.port_entry.pack(side="left")
+        self.test_btn = ActionButton(
+            address, text="测试端口", width=90, height=30, command=self._test_proxy_conn,
         )
-        self.host_entry.pack(side="left", padx=4)
+        self.test_btn.pack(side="right", padx=(8, 0))
 
-        ctk.CTkLabel(
-            p_row2,
-            text="端口:",
-            width=35,
-            anchor="e",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_PRIMARY
-        ).pack(side="left")
-
-        self.port_entry = ctk.CTkEntry(
-            p_row2,
-            width=65,
-            height=28,
-            corner_radius=5,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            border_color=COLOR_CARD_BORDER,
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.port_entry.pack(side="left", padx=4)
-
-        self.test_btn = ctk.CTkButton(
-            p_row2,
-            text="测试连通",
-            width=80,
-            height=28,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            text_color="#FFFFFF",
-            command=self._test_proxy_conn
-        )
-        self.test_btn.pack(side="left", padx=4)
-
+        bypass = self._form_row(proxy, "绕过地址")
+        self.bypass_entry = self._form_entry(bypass)
+        self.bypass_entry.pack(side="left", fill="x", expand=True)
         self.test_status_label = ctk.CTkLabel(
-            p_row2,
-            text="",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_MUTED
+            proxy, text="", anchor="w", justify="left", wraplength=415, height=18,
+            text_color=COLOR_TEXT_MUTED, font=ctk.CTkFont(family=FONT_FAMILY, size=12),
         )
-        self.test_status_label.pack(side="left", padx=6)
+        self.test_status_label.pack(fill="x", padx=12, pady=(0, 8))
 
-        # Bypass row
-        p_row3 = ctk.CTkFrame(proxy_card, fg_color="transparent")
-        p_row3.pack(fill="x", padx=14, pady=(2, 8))
-        ctk.CTkLabel(
-            p_row3,
-            text="绕过地址:",
-            width=65,
-            anchor="w",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_PRIMARY
-        ).pack(side="left")
-
-        self.bypass_entry = ctk.CTkEntry(
-            p_row3,
-            width=360,
-            height=28,
-            corner_radius=5,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            border_color=COLOR_CARD_BORDER,
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.bypass_entry.pack(side="left", padx=4)
-
-        # ====== Section 2: Antigravity Path ======
-        anti_card = ctk.CTkFrame(content_frame, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER, corner_radius=8)
-        anti_card.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(
-            anti_card,
-            text="Antigravity 运行配置",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(anchor="w", padx=14, pady=(8, 3))
-
+        antigravity = self._form_section(content, "Antigravity")
         self.anti_auto_var = ctk.BooleanVar(value=True)
-        self.anti_auto_chk = CrispCheckBox(
-            anti_card,
-            text="自动扫描安装位置 (推荐，自适应不同计算机路径)",
-            variable=self.anti_auto_var,
-            command=self._toggle_anti_path,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=16,
-            checkbox_height=16,
-            corner_radius=3,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            checkmark_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY
+        self.anti_path_entry, self.anti_browse_btn = self._path_fields(
+            antigravity, self.anti_auto_var, self._toggle_anti_path, self._browse_anti_path,
         )
-        self.anti_auto_chk.pack(anchor="w", padx=14, pady=2)
-
-        anti_p_row = ctk.CTkFrame(anti_card, fg_color="transparent")
-        anti_p_row.pack(fill="x", padx=14, pady=3)
-        ctk.CTkLabel(
-            anti_p_row,
-            text="自定义路径:",
-            width=65,
-            anchor="w",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_PRIMARY
-        ).pack(side="left")
-
-        self.anti_path_entry = ctk.CTkEntry(
-            anti_p_row,
-            width=305,
-            height=28,
-            corner_radius=5,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            border_color=COLOR_CARD_BORDER,
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.anti_path_entry.pack(side="left", padx=4)
-
-        self.anti_browse_btn = ctk.CTkButton(
-            anti_p_row,
-            text="浏览...",
-            width=60,
-            height=28,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._browse_anti_path
-        )
-        self.anti_browse_btn.pack(side="left", padx=2)
-
         self.anti_shim_var = ctk.BooleanVar(value=True)
-        self.anti_shim_chk = CrispCheckBox(
-            anti_card,
-            text="装载浏览器代理补丁 (Node.js/npx 自动接管 DevTools)",
-            variable=self.anti_shim_var,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=16,
-            checkbox_height=16,
-            corner_radius=3,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            checkmark_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.anti_shim_chk.pack(anchor="w", padx=14, pady=(2, 8))
+        self._form_check(
+            antigravity, "启用浏览器代理扩展（Node.js / npx）", self.anti_shim_var,
+        ).pack(anchor="w", padx=12, pady=(0, 8))
 
-        # ====== Section 3: Codex Path ======
-        codex_card = ctk.CTkFrame(content_frame, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER, corner_radius=8)
-        codex_card.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(
-            codex_card,
-            text="Codex (ChatGPT) 运行配置",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(anchor="w", padx=14, pady=(8, 3))
-
+        codex = self._form_section(content, "Codex (ChatGPT)")
         self.codex_auto_var = ctk.BooleanVar(value=True)
-        self.codex_auto_chk = CrispCheckBox(
-            codex_card,
-            text="自动检索 Microsoft Store 包 (OpenAI.Codex 注册表直查)",
-            variable=self.codex_auto_var,
-            command=self._toggle_codex_path,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=16,
-            checkbox_height=16,
-            corner_radius=3,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            checkmark_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY
+        self.codex_path_entry, self.codex_browse_btn = self._path_fields(
+            codex, self.codex_auto_var, self._toggle_codex_path, self._browse_codex_path,
         )
-        self.codex_auto_chk.pack(anchor="w", padx=14, pady=2)
 
-        codex_p_row = ctk.CTkFrame(codex_card, fg_color="transparent")
-        codex_p_row.pack(fill="x", padx=14, pady=(2, 8))
-        ctk.CTkLabel(
-            codex_p_row,
-            text="自定义路径:",
-            width=65,
-            anchor="w",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            text_color=COLOR_TEXT_PRIMARY
-        ).pack(side="left")
-
-        self.codex_path_entry = ctk.CTkEntry(
-            codex_p_row,
-            width=305,
-            height=28,
-            corner_radius=5,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            border_color=COLOR_CARD_BORDER,
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.codex_path_entry.pack(side="left", padx=4)
-
-        self.codex_browse_btn = ctk.CTkButton(
-            codex_p_row,
-            text="浏览...",
-            width=60,
-            height=28,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._browse_codex_path
-        )
-        self.codex_browse_btn.pack(side="left", padx=2)
-
-        # ====== Section 4: General Preferences ======
-        gen_card = ctk.CTkFrame(content_frame, fg_color=COLOR_CARD_BG, border_width=1, border_color=COLOR_CARD_BORDER, corner_radius=8)
-        gen_card.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(
-            gen_card,
-            text="全局偏好",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=COLOR_TEXT_SECTION
-        ).pack(anchor="w", padx=14, pady=(8, 3))
-
-        gen_row = ctk.CTkFrame(gen_card, fg_color="transparent")
-        gen_row.pack(fill="x", padx=14, pady=(2, 8))
-
+        general = self._form_section(content, "启动与托盘")
         self.tray_var = ctk.BooleanVar(value=True)
-        self.tray_chk = CrispCheckBox(
-            gen_row,
-            text="关闭时最小化到系统托盘",
-            variable=self.tray_var,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=16,
-            checkbox_height=16,
-            corner_radius=3,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            checkmark_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.tray_chk.pack(side="left", padx=(0, 20))
-
         self.check_clash_var = ctk.BooleanVar(value=True)
-        self.check_clash_chk = CrispCheckBox(
-            gen_row,
-            text="启动前强校验端口 (防误开直连)",
-            variable=self.check_clash_var,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=16,
-            checkbox_height=16,
-            corner_radius=3,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            checkmark_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.check_clash_chk.pack(side="left")
-
-        gen_row2 = ctk.CTkFrame(gen_card, fg_color="transparent")
-        gen_row2.pack(fill="x", padx=14, pady=(0, 8))
-
         self.start_minimized_var = ctk.BooleanVar(value=False)
-        self.start_minimized_chk = CrispCheckBox(
-            gen_row2,
-            text="启动后直接隐藏到系统托盘",
-            variable=self.start_minimized_var,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            checkbox_width=16,
-            checkbox_height=16,
-            corner_radius=3,
-            border_width=1,
-            border_color=COLOR_BORDER_STRONG,
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            checkmark_color="#FFFFFF",
-            text_color=COLOR_TEXT_PRIMARY
-        )
-        self.start_minimized_chk.pack(side="left")
+        for text, variable in (
+            ("关闭窗口时最小化到托盘", self.tray_var),
+            ("启动应用前检查代理端口", self.check_clash_var),
+            ("启动本工具时隐藏到托盘", self.start_minimized_var),
+        ):
+            self._form_check(general, text, variable).pack(anchor="w", padx=12, pady=(0, 6))
 
-        # ---------------- Bottom Action Button Bar ----------------
-        btn_bar = ctk.CTkFrame(self, fg_color="transparent")
-        btn_bar.pack(fill="x", padx=14, pady=(6, 12))
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=WINDOW_PADDING, pady=(8, 16))
+        ActionButton(footer, text="恢复默认", width=90, command=self._reset_defaults).pack(side="left")
+        cancel = ActionButton(footer, text="取消", width=72, command=self._close)
+        save = ActionButton(footer, text="保存", width=80, kind="primary", command=self._save_config)
+        save.pack(side="right")
+        cancel.pack(side="right", padx=(0, 8))
 
-        self.reset_btn = ctk.CTkButton(
-            btn_bar,
-            text="恢复默认",
-            width=80,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_MUTED,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._reset_defaults
+    def _form_section(self, parent, title):
+        section = ctk.CTkFrame(
+            parent, fg_color=COLOR_CARD_BG, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLOR_CARD_BORDER,
         )
-        self.reset_btn.pack(side="left")
+        section.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            section, text=title, text_color=COLOR_TEXT_HEADING,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(8, 4))
+        return section
 
-        self.save_btn = ctk.CTkButton(
-            btn_bar,
-            text="保存生效",
-            width=90,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            text_color="#FFFFFF",
-            command=self._save_config
-        )
-        self.save_btn.pack(side="right", padx=(6, 0))
+    def _form_row(self, section, title):
+        row = ctk.CTkFrame(section, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 8))
+        ctk.CTkLabel(
+            row, text=title, width=66, anchor="w", text_color=COLOR_TEXT_MUTED,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).pack(side="left")
+        return row
 
-        self.cancel_btn = ctk.CTkButton(
-            btn_bar,
-            text="取消",
-            width=65,
-            height=30,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="#FFFFFF",
-            text_color=COLOR_TEXT_SECTION,
-            hover_color=COLOR_CARD_HOVER,
-            border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            command=self._close
+    def _form_entry(self, parent, **kwargs):
+        entry = ctk.CTkEntry(
+            parent, height=30, corner_radius=BUTTON_RADIUS, border_width=1,
+            fg_color=COLOR_CARD_BG, border_color=COLOR_BORDER_STRONG, text_color=COLOR_TEXT_PRIMARY,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12), **kwargs,
         )
-        self.cancel_btn.pack(side="right")
+        entry.bind("<FocusIn>", lambda _event: entry.configure(border_color=COLOR_FOCUS), add="+")
+        entry.bind("<FocusOut>", lambda _event: entry.configure(border_color=COLOR_BORDER_STRONG), add="+")
+        return entry
+
+    def _form_check(self, parent, text, variable, command=None):
+        return CrispCheckBox(
+            parent, text=text, variable=variable, command=command,
+            checkbox_width=16, checkbox_height=16, border_width=1,
+            border_color=COLOR_BORDER_STRONG, fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, checkmark_color=COLOR_CARD_BG,
+            text_color=COLOR_TEXT_PRIMARY, font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        )
+
+    def _path_fields(self, section, auto, toggle, browse):
+        self._form_check(section, "自动查找安装", auto, toggle).pack(anchor="w", padx=12, pady=(0, 6))
+        row = self._form_row(section, "安装路径")
+        entry = self._form_entry(row)
+        entry.pack(side="left", fill="x", expand=True)
+        button = ActionButton(row, text="浏览…", width=70, height=30, command=browse)
+        button.pack(side="right", padx=(8, 0))
+        return entry, button
 
     def _load_values(self):
         cfg = self.config_mgr.config
@@ -607,8 +222,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.bypass_entry.insert(0, p_cfg.get("bypass", "localhost,127.0.0.1,::1"))
 
         preset_name = p_cfg.get("preset", "Clash / Mihomo (7890)")
-        if preset_name in self.preset_combo.cget("values"):
-            self.preset_combo.set(preset_name)
+        self.preset_combo.set(preset_name if preset_name in self.preset_combo.cget("values") else "自定义")
 
         # Antigravity
         a_cfg = cfg.get("apps", {}).get("antigravity", {})
@@ -633,18 +247,18 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _toggle_anti_path(self):
         if self.anti_auto_var.get():
-            self.anti_path_entry.configure(state="disabled", fg_color="#F2F2F2")
+            self.anti_path_entry.configure(state="disabled", fg_color=COLOR_INACTIVE_BG)
             self.anti_browse_btn.configure(state="disabled")
         else:
-            self.anti_path_entry.configure(state="normal", fg_color="#FFFFFF")
+            self.anti_path_entry.configure(state="normal", fg_color=COLOR_CARD_BG)
             self.anti_browse_btn.configure(state="normal")
 
     def _toggle_codex_path(self):
         if self.codex_auto_var.get():
-            self.codex_path_entry.configure(state="disabled", fg_color="#F2F2F2")
+            self.codex_path_entry.configure(state="disabled", fg_color=COLOR_INACTIVE_BG)
             self.codex_browse_btn.configure(state="disabled")
         else:
-            self.codex_path_entry.configure(state="normal", fg_color="#FFFFFF")
+            self.codex_path_entry.configure(state="normal", fg_color=COLOR_CARD_BG)
             self.codex_browse_btn.configure(state="normal")
 
     def _browse_anti_path(self):
@@ -681,8 +295,10 @@ class SettingsDialog(ctk.CTkToplevel):
         host = self.host_entry.get().strip() or "127.0.0.1"
         try:
             port = int(self.port_entry.get().strip())
+            if not 1 <= port <= 65535:
+                raise ValueError
         except ValueError:
-            self.test_status_label.configure(text="端口无效", text_color=COLOR_ERROR_TEXT)
+            self.test_status_label.configure(text="端口应为 1 至 65535 之间的整数", text_color=COLOR_ERROR_TEXT)
             return
 
         self.test_btn.configure(state="disabled", text="测试中...")
@@ -691,7 +307,7 @@ class SettingsDialog(ctk.CTkToplevel):
         def _run():
             reachable, latency, msg = probe_tcp_port(host, port, timeout_ms=1500)
             def _update():
-                self.test_btn.configure(state="normal", text="测试连通")
+                self.test_btn.configure(state="normal", text="测试端口")
                 if reachable:
                     self.test_status_label.configure(
                         text=f"正常 ({latency} ms)",
@@ -704,7 +320,7 @@ class SettingsDialog(ctk.CTkToplevel):
                     )
             self._dispatch_ui(_update)
 
-            self._run_in_background(_run)
+        self._run_in_background(_run)
 
     def _scan_ports(self):
         host = self.host_entry.get().strip() or "127.0.0.1"
@@ -720,6 +336,8 @@ class SettingsDialog(ctk.CTkToplevel):
                     self.host_entry.insert(0, best["host"])
                     self.port_entry.delete(0, "end")
                     self.port_entry.insert(0, str(best["port"]))
+                    preset = best["name"]
+                    self.preset_combo.set(preset if preset in self.preset_combo.cget("values") else "自定义")
                     self.test_status_label.configure(
                         text=f"匹配: {best['name']} ({best['latency_ms']} ms)",
                         text_color=COLOR_SUCCESS_TEXT
@@ -731,10 +349,10 @@ class SettingsDialog(ctk.CTkToplevel):
                     )
             self._dispatch_ui(_update)
 
-            self._run_in_background(_run)
+        self._run_in_background(_run)
 
     def _reset_defaults(self):
-        if messagebox.askyesno("确认恢复默认", "是否重置所有配置为默认值？", parent=self):
+        if ask_confirmation(self, "恢复默认配置", "是否重置所有配置为默认值？"):
             self.config_mgr.reset_to_defaults()
             self._close()
             if self.on_save_callback:
@@ -746,7 +364,8 @@ class SettingsDialog(ctk.CTkToplevel):
             if not (1 <= port <= 65535):
                 raise ValueError()
         except ValueError:
-            messagebox.showerror("格式错误", "端口必须在 1 到 65535 之间！", parent=self)
+            self.test_status_label.configure(text="端口应为 1 至 65535 之间的整数", text_color=COLOR_ERROR_TEXT)
+            self.port_entry.focus_set()
             return
 
         cfg = self.config_mgr.config
@@ -771,4 +390,4 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.on_save_callback()
             self._close()
         else:
-            messagebox.showerror("保存失败", "无法保存配置文件到磁盘，请检查目录权限。", parent=self)
+            show_message(self, "保存失败", "无法保存配置文件到磁盘，请检查目录权限。")

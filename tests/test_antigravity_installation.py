@@ -57,6 +57,23 @@ class AntigravityInstallationTests(unittest.TestCase):
             self.assertIn("Antigravity.exe: 15.2.124.19-electron.0", issues[0])
             self.assertIn("v8_context_snapshot.bin: 15.2.124.28-electron.0", issues[0])
 
+    def test_manual_diagnostic_explains_the_same_conflict_as_the_launch_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = self.make_installation(directory)
+            self.set_v8_versions(exe, "15.2.124.28-electron.0", "15.2.124.43-electron.0")
+            Path(exe).with_name("snapshot_blob.bin").write_bytes(b"\0" * 16 + b"15.2.124.43-electron.0")
+            engine = self.make_engine(directory, exe)
+            with mock.patch("core.launcher_engine.get_antigravity_update_pids", return_value=[]), \
+                 mock.patch.object(engine, "refresh_cached_paths"):
+                result = engine.diagnose_antigravity()
+                ready, message = engine._check_antigravity_launch_ready(exe)
+
+            self.assertEqual(result["installation"]["status"], "damaged")
+            self.assertFalse(ready)
+            issues = result["installation"]["issues"]
+            self.assertEqual(len(issues), 2)
+            self.assertTrue(all(issue in message for issue in issues))
+
     def test_unknown_snapshot_format_does_not_block_other_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             exe = self.make_installation(directory)
